@@ -43,9 +43,24 @@ function resolveBridgeScript(): string {
 }
 
 function resolvePython(): string {
-  // En un build empaquetado, usar el python embebido (todo: shipping).
-  // Por ahora usar el python del sistema.
-  return process.env.FACTURAPRO_PYTHON || 'python';
+  // 1. Variable de entorno explícita (override manual para dev/testing).
+  if (process.env.FACTURAPRO_PYTHON) return process.env.FACTURAPRO_PYTHON;
+  // 2. Runtime embebido dentro del .exe (resources/python-runtime/python.exe).
+  //    En dev: ROOT/resources/python-runtime/python.exe
+  //    En prod: RESOURCES_PATH/python-runtime/python.exe
+  const candidates = [
+    path.join(RESOURCES, 'python-runtime', 'python.exe'),
+    path.join(ROOT, 'resources', 'python-runtime', 'python.exe'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      console.log(`[main] Python embebido encontrado: ${c}`);
+      return c;
+    }
+  }
+  // 3. Fallback: python del sistema (útil en dev sin haber descargado el runtime).
+  console.log('[main] Usando python del sistema (no existe runtime embebido)');
+  return 'python';
 }
 
 function startBridge(): Promise<number> {

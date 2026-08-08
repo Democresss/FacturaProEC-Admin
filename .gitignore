@@ -8,6 +8,11 @@ package-lock.json
 /dist-build-*/
 /release/
 .release-id
+
+# Python runtime embebido (se regenera con scripts/setup-python-runtime.*) — ~80MB, no se versiona
+/resources/python-runtime/
+*.pyc
+__pycache__/
 *.exe
 *.exe.blockmap
 *.dmg

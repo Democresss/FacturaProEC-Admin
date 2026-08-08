@@ -1,6 +1,6 @@
 {
   "name": "facturaproec-admin",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "description": "FacturaProEC Admin Tool - Local DB, Files, VPN Manager",
   "author": "Democresss",
   "license": "MIT",
@@ -66,7 +66,19 @@
         "from": "resources",
         "to": "resources",
         "filter": [
-          "**/*"
+          "**/*",
+          "!python-runtime/**",
+          "!__pycache__/**"
+        ]
+      },
+      {
+        "from": "resources/python-runtime",
+        "to": "python-runtime",
+        "filter": [
+          "**/*",
+          "!__pycache__/**",
+          "!**/*.pyc",
+          "!get-pip.py"
         ]
       }
     ],
