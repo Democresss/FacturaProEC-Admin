@@ -30,9 +30,13 @@ const RESOURCES = process.resourcesPath || ROOT;
 
 function resolveBridgeScript(): string {
   // Dev: desde el source. Prod: desde resourcesPath/python-backend.
+  // IMPORTANTE: priorizar el FS real (RESOURCES/python-backend) sobre la
+  // copia dentro del app.asar — porque el spawn() del backend necesita un
+  // cwd que exista físicamente. app.asar/python-backend es virtual y NO se
+  // puede usar como cwd de spawn (Node lanza ENOENT).
   const candidates = [
-    path.join(ROOT, 'python-backend', 'bridge.py'),
-    path.join(RESOURCES, 'python-backend', 'bridge.py'),
+    path.join(RESOURCES, 'python-backend', 'bridge.py'),  // FS real (extraResources)
+    path.join(ROOT, 'python-backend', 'bridge.py'),        // dev (ROOT = admin-electron)
     path.join(ROOT, 'resources', 'python-backend', 'bridge.py'),
   ];
   for (const c of candidates) {
@@ -70,7 +74,11 @@ function startBridge(): Promise<number> {
     console.log(`[main] Lanzando bridge: ${pyExe} ${script}`);
 
     bridgeProcess = spawn(pyExe, [script], {
-      cwd: path.dirname(script),
+      // El cwd DEBE existir físicamente en el FS. Si el script está dentro del
+      // asar (path virtual), fallback a RESOURCES/python-backend (real).
+      cwd: fs.existsSync(path.dirname(script)) ? path.dirname(script)
+        : (fs.existsSync(path.join(RESOURCES, 'python-backend')) ? path.join(RESOURCES, 'python-backend')
+        : process.resourcesPath || undefined),
       env: { ...process.env, BRIDGE_PORT: '0', PYTHONUNBUFFERED: '1', RESOURCES_PATH: String(RESOURCES) },
       windowsHide: true,
     });
