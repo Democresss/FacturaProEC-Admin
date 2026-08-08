@@ -26,12 +26,16 @@ from typing import Any, Optional
 
 # Añadir el desktop_app al path para importar los módulos existentes
 # Dev: desde admin-electron/python-backend/ → ../../desktop_app
-# Prod (empaquetado): el desktop_app se copia a resources/desktop_app
+# Prod (empaquetado): el desktop_app se copia a resources/desktop-app (con guion)
+#                     pero el código lo importa como "desktop_app" (con underscore).
+# Manejamos ambos nombres para que funcione en dev y en build.
 _HERE = Path(__file__).resolve().parent
 _CANDIDATES = [
-    _HERE.parent.parent / "desktop_app",                       # dev
-    Path(__file__).resolve().parent.parent / "desktop_app",    # extraResources/python-backend/..
-    Path(os.environ.get("RESOURCES_PATH", "")) / "desktop-app",# packaged resourcesPath
+    _HERE.parent.parent / "desktop_app",                          # dev
+    Path(__file__).resolve().parent.parent / "desktop_app",       # extraResources/python-backend/.. (underscore)
+    Path(__file__).resolve().parent.parent / "desktop-app",       # idem pero con guion (empaquetado real)
+    Path(os.environ.get("RESOURCES_PATH", "")) / "desktop-app",  # packaged resourcesPath
+    Path(os.environ.get("RESOURCES_PATH", "")) / "desktop_app",  # idem underscore
 ]
 for _c in _CANDIDATES:
     if _c.exists() and str(_c) not in sys.path:

@@ -142,6 +142,18 @@ function createWindow() {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     mainWindow.loadFile(path.join(__dirname, '..', '..', 'renderer', 'index.html'));
+    // En producción: si el renderer falla al cargar o entra en error,
+    // abrir DevTools para poder diagnosticar (se cierra con Ctrl+W o F12).
+    mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      console.error(`[renderer] did-fail-load code=${code} desc=${desc} url=${url}`);
+      if (!mainWindow?.webContents.isDevToolsOpened()) {
+        mainWindow?.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
+    mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      const lvl = ['log', 'warn', 'error'][level] || 'log';
+      console.log(`[renderer:${lvl}] ${message}  (${sourceId}:${line})`);
+    });
   }
 
   mainWindow.once('ready-to-show', () => {
