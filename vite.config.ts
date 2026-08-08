@@ -4,6 +4,9 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  base: './',                       // CRÍTICO para Electron: rutas relativas
+                                    // (sin esto, index.html carga /assets/... y NO
+                                    //  funciona con loadFile + protocolo file://)
   resolve: {
     alias: {
       '@': path.resolve(__dirname, 'src/renderer'),
