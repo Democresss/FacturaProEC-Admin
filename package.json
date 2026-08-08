@@ -1,6 +1,6 @@
 {
   "name": "facturaproec-admin",
-  "version": "2.0.9",
+  "version": "2.1.0",
   "description": "FacturaProEC Admin Tool - Local DB, Files, VPN Manager",
   "author": "Democresss",
   "license": "MIT",
@@ -148,7 +148,10 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "FacturaProEC Admin",
-      "uninstallDisplayName": "FacturaProEC Admin"
+      "uninstallDisplayName": "FacturaProEC Admin",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": false
     }
   },
   "dependencies": {
