@@ -156,6 +156,12 @@ function copyToDownloads(version) {
 
 /* ─── 6. Git commit + tag (sólo código, sin binarios) ─── */
 function gitCommitAndTag(version, bumped) {
+  // En Windows `nul` es un dispositivo reservado; si un shell llegara a crear
+  // un archivo literal llamado `nul` (por un `>nul` mal redirigido), git add
+  // falla con "unable to index file 'nul'". Lo borramos por las dudas.
+  const nulPath = resolve(ROOT, 'nul');
+  if (existsSync(nulPath)) spawnSync('rm', ['-f', nulPath], { cwd: ROOT, shell: true });
+
   // No commitear si no hay cambios reales de código más allá del bump
   const status = execSync('git status --porcelain', { cwd: ROOT }).toString().trim();
   if (!status) { log('Sin cambios en el árbol de git (nada que commitear).'); return false; }

@@ -35,6 +35,9 @@ venv/
 # SO
 .DS_Store
 Thumbs.db
+# En Windows, `nul` es dispositivo reservado; si llega a existir como
+# archivo (por un `>nul` mal redirigido en Git Bash), no entra a git.
+nul
 
 # IDE
 .vscode/
