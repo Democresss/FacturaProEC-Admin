@@ -359,19 +359,25 @@ function setupAutoUpdater() {
   autoUpdater.on('update-available', (info: any) => {
     console.log(`[update] Disponible v${info.version} — descargando…`);
     mainWindow?.webContents.send('update:status', { state: 'available', version: info.version });
-    showNotification('Actualización disponible', `Descargando v${info.version}…`);
+    // No usamos Notification del SO para updates: el renderer muestra un modal
+    // con barra de progreso dentro de la app. Solo avisamos por SO si la app
+    // está minimizada a bandeja (para no romper la UX).
   });
   autoUpdater.on('update-not-available', () => {
     console.log('[update] Sin actualizaciones (al día).');
     mainWindow?.webContents.send('update:status', { state: 'up-to-date' });
   });
   autoUpdater.on('download-progress', (p: any) => {
+    // Enviar percent Y también el estado (para que el modal cambie a "descargando")
     mainWindow?.webContents.send('update:progress', { percent: Math.round(p.percent) });
   });
   autoUpdater.on('update-downloaded', (info: any) => {
     console.log(`[update] v${info.version} descargada — reiniciar para instalar.`);
     mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version });
-    showNotification('Actualización lista', `Reinicia para instalar v${info.version}.`);
+    // Si la ventana está oculta (minimizada a bandeja), avisar por SO una sola vez.
+    if (!mainWindow || !mainWindow.isVisible()) {
+      showNotification('Actualización lista', `Reinicia para instalar v${info.version}.`);
+    }
   });
   autoUpdater.on('error', (err: Error) => {
     console.warn('[update] error:', err?.message || err);

@@ -3,6 +3,7 @@ import { useBridge } from './hooks/useBridge';
 import { useTheme } from './hooks/useTheme';
 import { ToastProvider, useToast } from './components/Toast';
 import { CommandPalette, CommandItem } from './components/CommandPalette';
+import { UpdateModal } from './components/UpdateModal';
 import { DashboardView } from './views/Dashboard';
 import { DbViewerView } from './views/DbViewer';
 import { SriView } from './views/Sri';
@@ -138,6 +139,7 @@ export function App() {
   return (
     <ToastProvider>
       <AppInner />
+      <UpdateModal />
     </ToastProvider>
   );
 }
