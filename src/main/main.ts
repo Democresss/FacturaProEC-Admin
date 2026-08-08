@@ -141,7 +141,12 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', '..', 'renderer', 'index.html'));
+    // En el asar, __dirname = <ROOT>/dist/main. El renderer vive en <ROOT>/dist/renderer.
+    // Subimos 1 nivel (a dist/) y bajamos a renderer/ — NO 2 niveles (eso salta dist/ y falla).
+    // Usamos app.getAppPath() como ancla absoluta para no adivinar con ..
+    const rendererPath = path.join(app.getAppPath(), 'dist', 'renderer', 'index.html');
+    console.log(`[main] loadFile → ${rendererPath}  (exists? ${fs.existsSync(rendererPath)})`);
+    mainWindow.loadFile(rendererPath);
     // En producción: si el renderer falla al cargar o entra en error,
     // abrir DevTools para poder diagnosticar (se cierra con Ctrl+W o F12).
     mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
