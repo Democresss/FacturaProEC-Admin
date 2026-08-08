@@ -1,0 +1,10 @@
+uvicorn>=0.24.0
+fastapi>=0.104.0
+pydantic>=2.5.0
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+aiosqlite>=0.19.0
+paramiko>=3.4.0
+requests>=2.31.0
+full[easy]>=0.21.0

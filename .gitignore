@@ -1,0 +1,42 @@
+# Dependencias
+node_modules/
+package-lock.json
+
+# Builds / empaquetado (NO van al repo; van a GitHub Releases)
+/dist/
+/dist-build/
+/dist-build-*/
+/release/
+.release-id
+*.exe
+*.exe.blockmap
+*.dmg
+*.AppImage
+*.deb
+*.snap
+*.blockmap
+latest.yml
+builder-debug.yml
+*-unpacked/
+__appImage-*/
+
+# Logs y temporales
+*.log
+npm-debug.log*
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# SO
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.tsbuildinfo
