@@ -24,6 +24,7 @@ let bridgePort: number | null = null;
 let isQuitting = false;
 let actualizacionLista = false;   // descargada: se instala en cuanto la app quede en segundo plano
 let descargando = false;
+let archivoDescargado = '';   // ruta del .deb/.rpm/.exe descargado por electron-updater
 
 // Tras instalar una actualización en segundo plano la app vuelve a abrirse igual: escondida en la bandeja.
 const MARCA_OCULTA = () => path.join(app.getPath('userData'), 'arrancar-oculta');
@@ -458,8 +459,9 @@ function setupIpc() {
       return { ok: false, message: String(e?.message || e) };
     }
   });
-  ipcMain.handle('update:install', () => {
+  ipcMain.handle('update:install', async () => {
     try {
+      if (await instalarConAyudante()) { reabrirActualizada(false); return { ok: true }; }
       autoUpdater.quitAndInstall();
       return { ok: true };
     } catch (e: any) {
@@ -489,9 +491,38 @@ function instalacionSilenciosa(): boolean {
   return process.platform === 'win32' || (process.platform === 'linux' && !!process.env.APPIMAGE);
 }
 
-function instalarSiEstaOculta() {
-  if (!actualizacionLista || !instalacionSilenciosa()) return;
+/** Linux .deb/.rpm: con el Modo administrador, el ayudante con permisos instala la actualización sin pedir la clave. */
+async function instalarConAyudante(): Promise<boolean> {
+  if (process.platform !== 'linux' || process.env.APPIMAGE || !archivoDescargado || !bridgePort) return false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${bridgePort}/api/servidor/instalar-actualizacion`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': BRIDGE_TOKEN },
+      body: JSON.stringify({ ruta: archivoDescargado }),
+    });
+    const j: any = await r.json();
+    if (!j?.ok) console.warn('[update] ayudante:', j?.message);
+    return !!j?.ok;
+  } catch (e: any) {
+    console.warn('[update] ayudante no disponible:', e?.message || e);
+    return false;
+  }
+}
+
+function reabrirActualizada(oculta: boolean) {
+  if (oculta) { try { fs.writeFileSync(MARCA_OCULTA(), '1'); } catch { /* noop */ } }
+  isQuitting = true;
+  stopBridge();
+  app.relaunch();
+  app.exit(0);
+}
+
+async function instalarSiEstaOculta() {
+  if (!actualizacionLista) return;
   if (mainWindow && mainWindow.isVisible()) return;
+  if (!instalacionSilenciosa()) {
+    if (await instalarConAyudante()) reabrirActualizada(true);
+    return;
+  }
   console.log('[update] instalando en segundo plano…');
   try { fs.writeFileSync(MARCA_OCULTA(), '1'); } catch { /* noop */ }
   isQuitting = true;
@@ -532,6 +563,7 @@ function setupAutoUpdater() {
     mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version, notas: notasDe(info) });
     descargando = false;
     actualizacionLista = true;
+    archivoDescargado = String(info?.downloadedFile || '');
     // En la bandeja: se instala sola en silencio (sin notificación de Windows).
     setTimeout(instalarSiEstaOculta, 5000);
   });

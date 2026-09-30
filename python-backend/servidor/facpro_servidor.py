@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -526,6 +526,8 @@ def iniciar_docker():
             subprocess.Popen([DOCKER_DESKTOP_EXE])
     elif _MOTOR["nombre"] == "Docker Desktop":
         run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)
+    elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
+        ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
     else:
         run(["systemctl", "start", "docker"], timeout=60)
     for _ in range(45):
@@ -1720,6 +1722,198 @@ def activar_docker_al_arrancar():
     return {"ok": True}
 
 
+# ─────────────── Ayudante con permisos (Linux) ───────────────
+# La app corre como tu usuario. Lo que necesita administrador (encender Docker, instalar el vigilante del sistema,
+# instalar las actualizaciones de la app…) lo hace este servicio del sistema, que se instala UNA vez con la clave
+# (Modo administrador). Solo atiende a tu usuario (por el socket, SO_PEERCRED) y solo hace lo de esta lista.
+
+AYUDANTE_SOCKET = "/run/facpro-ayudante.sock"
+AYUDANTE_BIN = "/usr/local/lib/facpro/facpro-ayudante"
+AYUDANTE_SERVICIO = "/etc/systemd/system/facpro-ayudante.service"
+BANDERAS_AYUDANTE = ("--docker-al-arrancar", "--instalar-vigilante", "--quitar-vigilante", "--instalar-docker",
+                     "--modo-admin", "--iniciar-docker")
+PAQUETE_APP = "facturaproec-admin"
+BRIDGE_INSTALADO = "/opt/FacturaProEC Admin/resources/bridge/facpro-bridge"
+
+
+def ayudante(peticion, timeout=3600):
+    """Le pide algo al ayudante. Devuelve su respuesta ({ok, …}) o {ok: False, error}."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(AYUDANTE_SOCKET)
+            s.sendall((json.dumps(peticion) + "\n").encode("utf-8"))
+            datos = b""
+            while not datos.endswith(b"\n"):
+                trozo = s.recv(65536)
+                if not trozo:
+                    break
+                datos += trozo
+        return json.loads(datos.decode("utf-8") or "{}")
+    except (OSError, ValueError, AttributeError) as e:
+        return {"ok": False, "error": str(e)}
+
+
+def ayudante_disponible():
+    return (not ES_WINDOWS and os.path.exists(AYUDANTE_SOCKET)
+            and bool(ayudante({"orden": "hola"}, timeout=5).get("ok")))
+
+
+def _orden_ayudante(pet, usuario, datos):
+    """Lo único que hace el ayudante (como administrador). usuario: nombre; datos: su carpeta facpro-servidor."""
+    orden = pet.get("orden")
+    if orden == "hola":
+        return {"ok": True, "version": VERSION}
+    if orden == "bandera":
+        bandera = pet.get("bandera")
+        if bandera not in BANDERAS_AYUDANTE:
+            return {"ok": False, "error": "Acción no permitida"}
+        entorno = dict(os.environ, SUDO_USER=usuario, FACPRO_DATOS=datos)
+        try:
+            r = subprocess.run(_comando_ayudante() + ["--datos", datos, bandera], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=3600, env=entorno)
+            return {"ok": r.returncode == 0, "salida": ((r.stdout or "") + (r.stderr or ""))[-4000:]}
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"ok": False, "error": str(e)}
+    if orden == "instalar-paquete":
+        return _instalar_paquete(pet.get("ruta") or "", usuario)
+    return {"ok": False, "error": "Orden desconocida"}
+
+
+def _instalar_paquete(ruta, usuario):
+    """Instala una actualización de ESTA app (.deb o .rpm) descargada por la app en la carpeta del usuario.
+    Se copia a una carpeta de root antes de revisarla (así no se puede cambiar entre la revisión y la instalación) y
+    solo se instala si el paquete es facturaproec-admin."""
+    import pwd
+    casa = os.path.realpath(pwd.getpwnam(usuario).pw_dir)
+    real = os.path.realpath(ruta)
+    tipo = ".deb" if real.endswith(".deb") else ".rpm" if real.endswith(".rpm") else ""
+    if not tipo or not real.startswith(casa + os.sep) or not os.path.isfile(real):
+        return {"ok": False, "error": "Solo se instalan paquetes .deb/.rpm descargados por la app en tu carpeta."}
+    carpeta = "/var/lib/facpro"
+    os.makedirs(carpeta, mode=0o700, exist_ok=True)
+    copia = os.path.join(carpeta, "actualizacion" + tipo)
+    shutil.copyfile(real, copia)
+    os.chmod(copia, 0o600)
+    if tipo == ".deb":
+        code, nombre = run(["dpkg-deb", "-f", copia, "Package"], timeout=60)
+    else:
+        code, nombre = run(["rpm", "-qp", "--queryformat", "%{NAME}", copia], timeout=60)
+    if code != 0 or nombre.strip() != PAQUETE_APP:
+        return {"ok": False, "error": "Ese paquete no es FacPro Server Manager: no se instala."}
+    if tipo == ".deb":
+        code, out = run(["dpkg", "-i", copia], timeout=1800)
+        if code != 0 and shutil.which("apt-get"):
+            code, out = run(["apt-get", "-f", "install", "-y"], timeout=1800)
+    else:
+        herramienta = next((h for h in ("dnf", "zypper", "yum") if shutil.which(h)), None)
+        code, out = run(([herramienta, "install", "-y", copia] if herramienta != "zypper"
+                         else ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", copia]) if herramienta
+                        else ["rpm", "-U", "--replacepkgs", copia], timeout=1800)
+    if code != 0:
+        return {"ok": False, "error": "No se pudo instalar: %s" % out[-400:]}
+    # el ayudante se renueva con la versión recién instalada (archivo de root, puesto por el paquete)
+    reiniciar = False
+    if os.path.exists(BRIDGE_INSTALADO):
+        try:
+            shutil.copy2(BRIDGE_INSTALADO, AYUDANTE_BIN + ".nuevo")
+            os.replace(AYUDANTE_BIN + ".nuevo", AYUDANTE_BIN)
+            reiniciar = True
+        except OSError:
+            pass
+    return {"ok": True, "reiniciar": reiniciar}
+
+
+def _comando_ayudante():
+    if os.path.exists(AYUDANTE_BIN):
+        return [AYUDANTE_BIN]
+    if os.path.exists(AYUDANTE_BIN + ".py"):
+        return [sys.executable, AYUDANTE_BIN + ".py"]
+    return _comando_base()
+
+
+def servir_ayudante(uid):
+    """El ayudante (como root, lo arranca systemd): escucha en AYUDANTE_SOCKET y solo atiende al usuario uid."""
+    import pwd
+    datos_usuario = pwd.getpwuid(uid)
+    usuario, datos = datos_usuario.pw_name, os.path.join(datos_usuario.pw_dir, "facpro-servidor")
+    try:
+        os.unlink(AYUDANTE_SOCKET)
+    except OSError:
+        pass
+    servidor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    servidor.bind(AYUDANTE_SOCKET)
+    os.chmod(AYUDANTE_SOCKET, 0o666)   # cualquiera puede conectar, pero solo se atiende a uid (SO_PEERCRED)
+    servidor.listen(8)
+    print("Ayudante de FacPro listo para «%s»" % usuario, flush=True)
+
+    def atender(con):
+        salir = False
+        with con:
+            try:
+                credencial = con.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                quien = struct.unpack("3i", credencial)[1]
+                if quien not in (uid, 0):
+                    respuesta = {"ok": False, "error": "No autorizado"}
+                else:
+                    con.settimeout(30)
+                    linea = b""
+                    while not linea.endswith(b"\n") and len(linea) < 65536:
+                        trozo = con.recv(4096)
+                        if not trozo:
+                            break
+                        linea += trozo
+                    con.settimeout(None)
+                    respuesta = _orden_ayudante(json.loads(linea.decode("utf-8") or "{}"), usuario, datos)
+                    salir = bool(respuesta.pop("reiniciar", False))
+            except Exception as e:  # noqa: BLE001 - el ayudante nunca se cae por una petición
+                respuesta = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+            try:
+                con.sendall((json.dumps(respuesta) + "\n").encode("utf-8"))
+            except OSError:
+                pass
+        if salir:   # systemd lo vuelve a arrancar con el programa nuevo
+            os._exit(0)
+
+    while True:
+        con, _ = servidor.accept()
+        threading.Thread(target=atender, args=(con,), daemon=True).start()
+
+
+def instalar_ayudante():
+    """(como root) Copia el programa a una carpeta de root y lo deja como servicio del sistema."""
+    import pwd
+    if not shutil.which("systemctl"):
+        log("Este Linux no usa systemd: sin ayudante, cada tarea de administrador pedirá la clave.", "aviso")
+        return False
+    usuario = usuario_real()
+    if not usuario:
+        return False
+    uid = pwd.getpwnam(usuario).pw_uid
+    os.makedirs(os.path.dirname(AYUDANTE_BIN), mode=0o755, exist_ok=True)
+    if getattr(sys, "frozen", False) or os.path.exists(BRIDGE_INSTALADO):
+        origen = BRIDGE_INSTALADO if os.path.exists(BRIDGE_INSTALADO) else sys.executable
+        shutil.copy2(origen, AYUDANTE_BIN + ".nuevo")
+        os.replace(AYUDANTE_BIN + ".nuevo", AYUDANTE_BIN)
+        os.chown(AYUDANTE_BIN, 0, 0)
+        os.chmod(AYUDANTE_BIN, 0o755)
+        comando = [AYUDANTE_BIN]
+    else:
+        shutil.copy2(os.path.abspath(__file__), AYUDANTE_BIN + ".py")
+        os.chown(AYUDANTE_BIN + ".py", 0, 0)
+        os.chmod(AYUDANTE_BIN + ".py", 0o644)
+        comando = [sys.executable, AYUDANTE_BIN + ".py"]
+    with open(AYUDANTE_SERVICIO, "w", encoding="utf-8") as f:
+        f.write("[Unit]\nDescription=FacPro - ayudante con permisos (solo para %s)\nAfter=local-fs.target\n\n"
+                "[Service]\nExecStart=%s --ayudante --uid %d\nRestart=always\nRestartSec=5\n\n"
+                "[Install]\nWantedBy=multi-user.target\n" % (usuario, _linea_systemd(comando), uid))
+    run(["systemctl", "daemon-reload"])
+    run(["systemctl", "enable", "facpro-ayudante"])
+    run(["systemctl", "restart", "facpro-ayudante"])
+    log("Ayudante con permisos instalado: la app ya no pedirá la clave para sus tareas.", "ok")
+    return True
+
+
 def modo_admin_estado():
     """¿La app puede usar todo sin pedir clave? Linux: tu usuario en el grupo docker (ve el Docker del sistema) y el
     vigilante como servicio del sistema. Windows: tu usuario en docker-users y el vigilante al encender el equipo."""
@@ -1742,14 +1936,18 @@ def modo_admin_estado():
     except (KeyError, ImportError):
         vale_ya = not os.path.exists("/var/run/docker.sock")
     sistema = os.path.exists(SERVICIO_LINUX)
-    faltan = ([] if grupo else ["tu usuario no puede usar el Docker del sistema"]) + ([] if sistema else ["el vigilante no es servicio del sistema"])
+    con_ayudante = os.path.exists(AYUDANTE_SERVICIO) or not shutil.which("systemctl")
+    faltan = (([] if grupo else ["tu usuario no puede usar el Docker del sistema"])
+              + ([] if sistema else ["el vigilante no es servicio del sistema"])
+              + ([] if con_ayudante else ["el ayudante con permisos (para no volver a pedir la clave)"]))
     if faltan:
         detalle = "Falta: " + ", ".join(faltan)
     elif not vale_ya:
         detalle = "Activado. Cierra sesión y vuelve a entrar (o reinicia) para que la app vea el Docker del sistema sin clave."
     else:
-        detalle = "Todo con permiso: ve todos los Docker sin clave y el vigilante arranca con el equipo"
-    return {"activo": grupo and sistema, "vale_ya": vale_ya, "detalle": detalle}
+        detalle = ("Todo con permiso, sin volver a pedir clave: ve todos los Docker, el vigilante arranca con el equipo "
+                   "y las actualizaciones se instalan solas")
+    return {"activo": grupo and sistema and con_ayudante, "vale_ya": vale_ya, "detalle": detalle}
 
 
 def activar_modo_admin():
@@ -1775,6 +1973,7 @@ def activar_modo_admin():
     if shutil.which("systemctl") and run(["systemctl", "cat", "docker"], timeout=15)[0] == 0:
         run(["systemctl", "enable", "docker"], timeout=60)
     instalar_vigilante()
+    instalar_ayudante()
     log("Modo administrador activo. Cierra sesión y vuelve a entrar para que la app vea el Docker del sistema sin clave.", "ok")
     return {"ok": True}
 
@@ -2143,6 +2342,14 @@ def _abrir_como_admin(argumento):
         code, out = run(["powershell", "-NoProfile", "-Command", orden], timeout=3600)
         if code != 0:
             raise RuntimeError("No se pudo completar como administrador (¿se canceló el permiso de Windows?). %s" % out[-200:])
+        return
+    if argumento in BANDERAS_AYUDANTE and ayudante_disponible():
+        r = ayudante({"orden": "bandera", "bandera": argumento})
+        for linea in (r.get("salida") or "").splitlines()[-15:]:
+            if linea.strip():
+                log(linea.strip().lstrip("✔✖!»· ").strip(), "ok" if r.get("ok") else "aviso")
+        if not r.get("ok"):
+            raise RuntimeError("El ayudante no pudo completarlo: %s" % (r.get("error") or (r.get("salida") or "")[-300:]))
         return
     if shutil.which("pkexec"):
         code, out = run(["pkexec"] + comando, timeout=3600)
@@ -2883,6 +3090,15 @@ def main(argv=None):
     if "--servicios" in args:
         print(json.dumps(servicios(), ensure_ascii=False, indent=2))
         return 0
+    if "--ayudante" in args:
+        i = args.index("--uid") if "--uid" in args else -1
+        if ES_WINDOWS or os.geteuid() != 0 or i < 0 or i + 1 >= len(args):
+            print("  ✖ El ayudante solo corre como servicio del sistema (root) con --uid.")
+            return 1
+        servir_ayudante(int(args[i + 1]))
+        return 0
+    if "--iniciar-docker" in args:
+        return 0 if iniciar_docker() else 1
     if "--instalar-docker" in args:
         try:
             instalar_docker()

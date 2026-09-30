@@ -48,6 +48,10 @@ class Motor(BaseModel):
     host: str = ""
 
 
+class Paquete(BaseModel):
+    ruta: str
+
+
 class Nombre(BaseModel):
     nombre: str
 
@@ -101,6 +105,21 @@ def motor(m: Motor) -> Dict[str, Any]:
         return dict(fs.usar_motor(m.host), message="Docker cambiado")
     except RuntimeError as e:
         return {"ok": False, "message": str(e)}
+
+
+@router.get("/ayudante")
+def ayudante() -> Dict[str, Any]:
+    """¿Está el ayudante con permisos de Linux (Modo administrador)?"""
+    return {"ok": True, "disponible": fs.ayudante_disponible()}
+
+
+@router.post("/instalar-actualizacion")
+def instalar_actualizacion(p: Paquete) -> Dict[str, Any]:
+    """Linux: la actualización descargada (.deb/.rpm) la instala el ayudante, sin pedir la clave."""
+    if not fs.ayudante_disponible():
+        return {"ok": False, "sin_ayudante": True, "message": "Sin Modo administrador: se pedirá la clave del sistema."}
+    r = fs.ayudante({"orden": "instalar-paquete", "ruta": p.ruta})
+    return {"ok": bool(r.get("ok")), "message": r.get("error") or "Actualización instalada"}
 
 
 @router.post("/instalar-docker")
