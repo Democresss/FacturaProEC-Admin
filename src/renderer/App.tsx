@@ -11,8 +11,9 @@ import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
 import { VpnView } from './views/Vpn';
 import { ConfigView } from './views/Config';
+import { DiagnosticsView } from './views/Diagnostics';
 
-type TabId = 'dashboard' | 'db' | 'sri' | 'security' | 'storage' | 'vpn' | 'config';
+type TabId = 'dashboard' | 'db' | 'sri' | 'security' | 'storage' | 'vpn' | 'diagnostics' | 'config';
 
 interface TabDef {
   id: TabId;
@@ -22,13 +23,14 @@ interface TabDef {
 }
 
 const TABS: TabDef[] = [
-  { id: 'dashboard', label: 'Dashboard',    icon: '⌂', desc: 'Resumen del sistema' },
-  { id: 'db',        label: 'Base de Datos', icon: '🗄', desc: 'Viewer PostgreSQL' },
-  { id: 'sri',       label: 'SRI / Recepción', icon: '🧾', desc: 'IMAP + RUC' },
-  { id: 'security',  label: 'Seguridad',    icon: '🛡', desc: 'Guardian anti-intrusión' },
-  { id: 'storage',   label: 'Almacenamiento', icon: '💾', desc: 'SFTP / FTP / Docker' },
-  { id: 'vpn',       label: 'VPN',          icon: '🔒', desc: 'PG remoto + túneles' },
-  { id: 'config',    label: 'Configuración', icon: '⚙', desc: 'Tema, autostart, etc.' },
+  { id: 'dashboard',   label: 'Dashboard',    icon: '⌂', desc: 'Resumen del sistema' },
+  { id: 'db',          label: 'Base de Datos', icon: '🗄', desc: 'Viewer PostgreSQL' },
+  { id: 'sri',         label: 'SRI / Recepción', icon: '🧾', desc: 'IMAP + RUC' },
+  { id: 'security',    label: 'Seguridad',    icon: '🛡', desc: 'Guardian anti-intrusión' },
+  { id: 'storage',     label: 'Almacenamiento', icon: '💾', desc: 'SFTP / FTP / Docker' },
+  { id: 'vpn',         label: 'VPN',          icon: '🔒', desc: 'PG remoto + túneles' },
+  { id: 'diagnostics', label: 'Diagnóstico',  icon: '🩺', desc: 'Radar de puertos, errores y túneles' },
+  { id: 'config',      label: 'Configuración', icon: '⚙', desc: 'Tema, autostart, etc.' },
 ];
 
 function AppInner() {
@@ -50,6 +52,40 @@ function AppInner() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
+
+  // Telemetría autónoma: captura excepciones de UI y las envía al ErrorCollector
+  useEffect(() => {
+    const handleError = (e: ErrorEvent) => {
+      call('/api/diagnostics/report-error', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: e.message || 'Error en Renderer UI',
+          detail: `${e.filename || 'unknown'}:${e.lineno || 0}:${e.colno || 0}`,
+          stack_trace: e.error?.stack || '',
+          severity: 'error',
+          source: 'electron-renderer',
+        }),
+      }).catch(() => {});
+    };
+    const handleRejection = (e: PromiseRejectionEvent) => {
+      call('/api/diagnostics/report-error', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: 'Promesa no manejada en UI',
+          detail: String(e.reason),
+          stack_trace: e.reason?.stack || '',
+          severity: 'warning',
+          source: 'electron-renderer',
+        }),
+      }).catch(() => {});
+    };
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, [call]);
 
   const goto = useCallback((id: TabId) => setActiveTab(id), []);
 
@@ -125,7 +161,8 @@ function AppInner() {
           {activeTab === 'sri' && <SriView call={call} toast={toast} />}
           {activeTab === 'security' && <SecurityView call={call} toast={toast} />}
           {activeTab === 'storage' && <StorageView call={call} toast={toast} />}
-          {activeTab === 'vpn' && <VpnView call={call} toast={toast} />}
+          {activeTab === 'vpn' && <VpnView call={call} toast={toast} goto={goto} />}
+          {activeTab === 'diagnostics' && <DiagnosticsView call={call} toast={toast} />}
           {activeTab === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
         </main>
       </div>

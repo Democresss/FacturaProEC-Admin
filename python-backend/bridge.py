@@ -47,12 +47,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
-from service_runner import ServiceRunner
+from service_runner import ServiceRunner, DEFAULT_PROFILES
 from sys_info import (
     is_admin, get_local_ip, get_disk_info, count_local_files,
     check_port_open, ping_host, detect_local_services,
     check_active_net_connections, test_sftp_full_connection,
+    inspect_special_ports, find_next_free_port, SPECIAL_PORTS_CATALOG,
 )
+try:
+    from core.error_collector import error_collector
+except ImportError:
+    try:
+        from error_collector import error_collector
+    except ImportError:
+        error_collector = None
+
 from ui.tabs.db_viewer.connection_manager import DbConfig, get_default as get_cm
 from ui.tabs.db_viewer.table_explorer import TableExplorer
 from ui.tabs.db_viewer.query_runner import QueryRunner, QueryResult
@@ -230,6 +239,27 @@ class GuardianConfigPayload(BaseModel):
     ports: Optional[list[int]] = None
 
 
+class TunnelStartPayload(BaseModel):
+    tunnel_type: str = "zrok_tcp"
+    port: int = 5432
+    token: Optional[str] = None
+
+
+class TunnelStopPayload(BaseModel):
+    tunnel_id: str
+
+
+class ErrorReportPayload(BaseModel):
+    title: str
+    detail: str = ""
+    severity: str = "error"
+    source: str = "renderer"
+    code: Optional[str] = None
+    stack_trace: Optional[str] = None
+    port: Optional[int] = None
+    suggested_fix: Optional[str] = None
+
+
 # ───────────────────────────── endpoints: sistema ──────────────────
 @app.get("/api/system/info")
 def system_info():
@@ -246,6 +276,18 @@ def system_info():
         }
     except Exception as e:
         return {"ok": False, "error": f"{e.__class__.__name__}: {e}"}
+
+
+@app.get("/api/system/special-ports")
+def system_special_ports():
+    """Escanea y diagnostica el estado de puertos críticos y conflictos"""
+    return inspect_special_ports()
+
+
+@app.get("/api/profiles")
+def get_profiles():
+    """Retorna los perfiles multi-tenant disponibles (FacturaProEC, Harpi Corp, etc.)"""
+    return {"ok": True, "profiles": DEFAULT_PROFILES}
 
 
 @app.get("/api/system/ping")
@@ -304,8 +346,41 @@ def sftp_install_openssh():
 
 
 @app.post("/api/docker/launch")
-def docker_launch():
-    return _result(_runner.launch_docker_stack())
+def docker_launch(payload: dict = None):
+    payload = payload or {}
+    prof_name = payload.get("profile", "facturapro")
+    prof = DEFAULT_PROFILES.get(prof_name, DEFAULT_PROFILES["facturapro"])
+
+    pg_db = payload.get("pg_db") or prof.get("pg_db", "facturapro_db")
+    pg_user = payload.get("pg_user") or prof.get("pg_user", "postgres_user")
+    pg_pass = payload.get("pg_pass") or prof.get("pg_pass", "ClaveSegura123!")
+    minio_user = payload.get("minio_user") or prof.get("minio_user", "admin")
+    minio_pass = payload.get("minio_pass") or prof.get("minio_pass", "ClaveSegura123!")
+    vps_ip = payload.get("vps_ip") or prof.get("vps_ip", "159.223.110.159")
+    frp_port = int(payload.get("frp_port") or prof.get("frp_port", 7000))
+    frp_token = payload.get("frp_token") or prof.get("frp_token", "FacturaProSecure2026!#")
+    include_frpc = bool(payload.get("include_frpc", True))
+    pg_host_port = int(payload.get("pg_host_port")) if payload.get("pg_host_port") else None
+    minio_host_port = int(payload.get("minio_host_port")) if payload.get("minio_host_port") else None
+    minio_console_host_port = int(payload.get("minio_console_host_port")) if payload.get("minio_console_host_port") else None
+    auto_remap = bool(payload.get("auto_remap", True))
+
+    return _result(_runner.launch_docker_stack(
+        pg_db=pg_db,
+        pg_user=pg_user,
+        pg_pass=pg_pass,
+        minio_user=minio_user,
+        minio_pass=minio_pass,
+        vps_ip=vps_ip,
+        frp_port=frp_port,
+        frp_token=frp_token,
+        include_frpc=include_frpc,
+        profile=prof_name,
+        pg_host_port=pg_host_port,
+        minio_host_port=minio_host_port,
+        minio_console_host_port=minio_console_host_port,
+        auto_remap=auto_remap,
+    ))
 
 
 @app.get("/api/docker/installed")
@@ -597,6 +672,80 @@ def security_check_connections():
     allowed = _guardian.get_allowed_ips()
     suspicious = check_active_net_connections(ports, allowed)
     return {"ok": True, "suspicious": suspicious, "allowed_ips": list(allowed)}
+
+
+# ───────────────────────────── endpoints: diagnostico & errores ────
+@app.get("/api/diagnostics/errors")
+def diagnostics_errors(limit: int = 100, severity: Optional[str] = None):
+    if not error_collector:
+        return {"ok": True, "errors": [], "stats": {}}
+    return {
+        "ok": True,
+        "errors": error_collector.get_errors(limit=limit, severity=severity),
+        "stats": error_collector.get_stats(),
+    }
+
+
+@app.post("/api/diagnostics/errors/clear")
+def diagnostics_errors_clear():
+    if error_collector:
+        error_collector.clear_errors()
+    return {"ok": True, "message": "Registro de errores limpiado."}
+
+
+@app.get("/api/diagnostics/export")
+def diagnostics_export():
+    if not error_collector:
+        return {"ok": False, "message": "ErrorCollector no disponible."}
+    report = error_collector.export_diagnostics_report()
+    return {"ok": True, "report": report}
+
+
+@app.post("/api/diagnostics/report-error")
+def diagnostics_report_error(payload: ErrorReportPayload):
+    if error_collector:
+        ev = error_collector.record_error(
+            title=payload.title,
+            detail=payload.detail,
+            severity=payload.severity,
+            source=payload.source,
+            code=payload.code,
+            stack_trace=payload.stack_trace,
+            port=payload.port,
+            suggested_fix=payload.suggested_fix,
+        )
+        return {"ok": True, "event": ev}
+    return {"ok": False, "message": "ErrorCollector no disponible."}
+
+
+@app.post("/api/diagnostics/auto-heal")
+def diagnostics_auto_heal():
+    return _runner.auto_heal_conflicts()
+
+
+# ───────────────────────────── endpoints: tuneles ──────────────────
+@app.get("/api/tunnels/status")
+def tunnels_status():
+    return {"ok": True, "tunnels": _runner.get_tunnels_status()}
+
+
+@app.post("/api/tunnels/start")
+def tunnels_start(payload: TunnelStartPayload):
+    extra = {}
+    if payload.token:
+        extra["token"] = payload.token
+    ok, msg, data = _runner.start_tunnel(
+        tunnel_type=payload.tunnel_type,
+        port=payload.port,
+        extra_args=extra
+    )
+    return {"ok": ok, "message": msg, "data": data}
+
+
+@app.post("/api/tunnels/stop")
+def tunnels_stop(payload: TunnelStopPayload):
+    ok, msg = _runner.stop_tunnel(payload.tunnel_id)
+    return {"ok": ok, "message": msg}
 
 
 # ───────────────────────────── helpers ────────────────────────────

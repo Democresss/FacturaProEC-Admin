@@ -2,9 +2,10 @@ import React, { useState, useCallback } from 'react';
 import { Card } from '../components/Card';
 import { AsyncButton } from '../components/Button';
 
-export function VpnView({ call, toast }: {
+export function VpnView({ call, toast, goto }: {
   call: (path: string, opts?: RequestInit) => Promise<any>;
   toast: (title: string, body?: string, kind?: any) => void;
+  goto?: (id: any) => void;
 }) {
   const [host, setHost] = useState('');
   const [port, setPort] = useState('22');
@@ -75,7 +76,18 @@ export function VpnView({ call, toast }: {
         </div>
       </Card>
 
-      <Card title="Túneles VPN" sub="Enlaces de ayuda para configurar WireGuard/Tailscale/Cloudflare" icon={<span>🔒</span>}>
+      <Card title="Túneles VPN & Acceso Remoto" sub="Gestión de túneles directos y enlaces oficiales" icon={<span>🔒</span>}>
+        {goto && (
+          <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg-hover)', borderRadius: 'var(--radius-sm)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <strong style={{ fontSize: 13 }}>Gestor Nativo de Túneles (Zrok / Ngrok)</strong>
+              <div className="muted fs-12">Monitorea procesos activos, URLs públicas y puertos en tiempo real.</div>
+            </div>
+            <button className="btn btn-primary" onClick={() => goto('diagnostics')}>
+              🩺 Abrir Panel de Túneles & Puertos
+            </button>
+          </div>
+        )}
         <div className="grid-2 gap-8">
           <button className="btn" onClick={() => (window as any).electronAPI?.openExternal('https://www.wireguard.com/install/')}>🛡 WireGuard (web oficial)</button>
           <button className="btn" onClick={() => (window as any).electronAPI?.openExternal('https://tailscale.com/download')}>🦖 Tailscale (descargar)</button>
