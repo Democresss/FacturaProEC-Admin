@@ -13,6 +13,8 @@ type Toast = (title: string, body?: string, kind?: any) => void;
 
 interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string; puertos?: string; rol?: string; estado?: string }
 interface MotorDocker { nombre: string; host: string; contenedores: number; elegido: boolean }
+// «2024-05-01 12:00:00 -0500 -05» → «creado 2024-05-01»
+const creado = (c: Contenedor) => c.creado ? ` · creado ${c.creado.slice(0, 10)}` : '';
 const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
 interface Base { nombre: string; dueno: string; tablas: number | null }
 interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null }
@@ -276,7 +278,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
                 <div style={{ minWidth: 0 }}>
                   <div className="fs-13"><span style={{ color: c.corriendo ? 'var(--success)' : 'var(--text-muted)' }}>●</span>{' '}
                     <b className="mono">{c.nombre}</b> <span className="muted fs-12">{c.imagen}</span></div>
-                  <div className="fs-12 muted">{c.corriendo ? 'encendido' : (c.estado || 'apagado')}{c.puertos ? ` · puertos ${c.puertos}` : ' · sin puertos publicados'}</div>
+                  <div className="fs-12 muted">{c.corriendo ? 'encendido' : (c.estado || 'apagado')}{c.puertos ? ` · puertos ${c.puertos}` : ' · sin puertos publicados'}{creado(c)}</div>
                 </div>
                 <div className="row gap-4" style={{ flexShrink: 0 }}>
                   {usado && <span className="badge ok">en uso</span>}
@@ -307,7 +309,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               <label className="form-label">PostgreSQL que usará FacturaPro ({listaPg.length} encontrado{listaPg.length === 1 ? '' : 's'})</label>
               <select className="input" value={pgElegido || pg.contenedor}
                       onChange={e => { setPgElegido(e.target.value); setBase(''); analizar(e.target.value, minioElegido || undefined); }}>
-                {listaPg.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{c.corriendo ? '' : ' (apagado)'}</option>)}
+                {listaPg.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
             </div>
           )}
@@ -357,7 +359,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             <div className="form-row">
               <label className="form-label">MinIO ({listaMinio.length} encontrado{listaMinio.length === 1 ? '' : 's'}){minio ? ': ¿cuál publico?' : ''}</label>
               <select className="input" value={minioElegido || listaMinio[0].nombre} onChange={e => setMinioElegido(e.target.value)}>
-                {listaMinio.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{c.corriendo ? '' : ' (apagado)'}</option>)}
+                {listaMinio.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
             </div>
           )}
