@@ -15,6 +15,17 @@ interface Contenedor { nombre: string; imagen: string; corriendo: boolean; cread
 interface Base { nombre: string; dueno: string; tablas: number | null }
 interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null }
 interface LineaLog { hora: string; nivel: string; texto: string }
+interface Servicio {
+  id: string; tipo: string; nombre: string; detalle: string; corriendo: boolean; automatico: boolean | null;
+  accion: string | null; contenedor?: string; pid?: number; instalado?: boolean; sin_enlace?: boolean;
+}
+
+const TEXTO_ACCION: Record<string, string> = {
+  'automatico': 'Hacer automático', 'docker-al-arrancar': 'Encender con el equipo', 'vigilante': 'Instalar',
+  'detener-suelto': 'Detener', 'app': 'Arrancar con la sesión',
+};
+const colorServicio = (s: Servicio) => s.automatico === null ? 'var(--text-muted)'
+  : s.automatico && s.corriendo ? 'var(--success)' : s.automatico ? 'var(--warning)' : s.corriendo ? 'var(--warning)' : 'var(--danger)';
 
 const COLOR: Record<string, string> = { ok: '#22c55e', error: '#ef4444', aviso: '#f59e0b', paso: '#38bdf8' };
 const NUEVA = '__nueva__';
@@ -35,7 +46,23 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const [resultado, setResultado] = useState<any>(null);
   const [verClave, setVerClave] = useState(false);
   const [enlace, setEnlace] = useState('');
+  const [servs, setServs] = useState<{ servicios: Servicio[]; todo_automatico: boolean } | null>(null);
+  const [appAuto, setAppAuto] = useState<boolean | null>(null);
   const desde = useRef(0);
+
+  const cargarServicios = useCallback(async () => {
+    const r = await call('/api/servidor/servicios');
+    if (r.ok) setServs(r.data);
+    const ea = (window as any).electronAPI;
+    if (ea?.autostart?.get) { try { setAppAuto(!!(await ea.autostart.get())); } catch { /* sin Electron */ } }
+  }, [call]);
+
+  // La lista se refresca sola (el vigilante deja su latido cada minuto)
+  useEffect(() => {
+    cargarServicios();
+    const id = setInterval(cargarServicios, 30000);
+    return () => clearInterval(id);
+  }, [cargarServicios]);
 
   const analizar = useCallback(async (pg?: string, mi?: string) => {
     setCargando(true);
@@ -70,6 +97,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         if (r.error) toast('No se pudo terminar', r.error, 'danger');
         else if (nombre === 'configurar' && r.resultado) { setResultado(r.resultado); toast('¡Listo!', 'Tu base está en línea', 'success'); }
         analizar(pgElegido || undefined, minioElegido || undefined);
+        cargarServicios();
       }
     }, 700);
     return () => clearInterval(id);
@@ -104,6 +132,34 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     if (pg.estado === 'nativo') Object.assign(o, nativo);
     setResultado(null);
     return empezar('configurar', '/api/servidor/configurar', o);
+  };
+
+  const accionServicio = (accion: string, objetivo?: string | number) =>
+    empezar('servicios', '/api/servidor/servicios/accion', { accion, objetivo: objetivo == null ? null : String(objetivo) });
+
+  const appAutomatica = async () => {
+    const ea = (window as any).electronAPI;
+    if (!ea?.autostart?.set) return;
+    const r = await ea.autostart.set(true);
+    await call('/api/config', { method: 'POST', body: JSON.stringify({ data: { autostart: true } }) });
+    toast('Arranque automático', r.message, r.ok ? 'success' : 'danger');
+    cargarServicios();
+  };
+
+  const listaServicios: Servicio[] = [
+    ...(servs?.servicios || []),
+    ...(appAuto === null ? [] : [{
+      id: 'app', tipo: 'app', nombre: 'FacPro Server Manager en segundo plano', corriendo: true, automatico: appAuto,
+      accion: appAuto ? null : 'app',
+      detalle: appAuto ? 'Arranca sola al iniciar sesión, en la bandeja: también vigila el túnel'
+                       : 'No arranca sola: ábrela después de reiniciar (o instala el vigilante)',
+    } as Servicio]),
+  ];
+  const todoAutomatico = !!servs?.todo_automatico && appAuto !== false;
+
+  const hacerTodo = async () => {
+    if (appAuto === false) await appAutomatica();
+    await accionServicio('todo');
   };
 
   const estadoTunel = (t: Tunel) => !t.puerto ? 'sin puerto' : !t.en_linea ? 'no responde'
@@ -144,6 +200,46 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               {a.conexion && <div className="fs-12" style={{ color: a.conexion.en_linea ? '#22c55e' : '#ef4444' }}>
                 {a.conexion.en_linea ? 'Tu base responde desde internet con SSL' : 'Configurada pero no responde ahora'}</div>}
             </div>
+          </div>
+        )}
+      </Card>
+
+      <Card title="Servicios automáticos" icon={<span>♻</span>}
+            sub="Lo que tiene que levantarse solo para que FacturaPro nunca pierda tu base: tras un corte de luz, un reinicio o si algo se cae."
+            right={<AsyncButton size="sm" onClick={cargarServicios}>↻</AsyncButton>}>
+        {!servs && <div className="muted fs-12">Revisando servicios…</div>}
+        {listaServicios.map(s => (
+          <div key={s.id} className="row between items-center gap-8" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="fs-13 fw-700"><span style={{ color: colorServicio(s) }}>●</span> {s.nombre}</div>
+              <div className="fs-12 muted">{s.detalle}</div>
+            </div>
+            <div className="row gap-4" style={{ flexShrink: 0 }}>
+              {s.accion && (
+                <AsyncButton size="sm" variant={s.accion === 'detener-suelto' ? 'danger' : 'primary'} disabled={!!tarea}
+                             confirmText={s.accion === 'detener-suelto' ? 'Se detiene ese bore (lo que publica deja de verse desde internet).' : undefined}
+                             onClick={() => s.accion === 'app' ? appAutomatica() : accionServicio(s.accion!, s.contenedor ?? s.pid)}>
+                  {s.tipo === 'vigilante' && s.instalado ? 'Actualizar' : TEXTO_ACCION[s.accion] || s.accion}
+                </AsyncButton>
+              )}
+              {s.tipo === 'vigilante' && s.instalado && (
+                <AsyncButton size="sm" variant="danger" disabled={!!tarea}
+                             confirmText="Si el túnel se cae con la app cerrada, nadie lo levantará solo."
+                             onClick={() => accionServicio('quitar-vigilante')}>Quitar</AsyncButton>
+              )}
+            </div>
+          </div>
+        ))}
+        {servs && (
+          <div className="btn-row">
+            <AsyncButton variant="success" disabled={!!tarea || todoAutomatico} onClick={hacerTodo}>
+              {todoAutomatico ? '✓ Todo se levanta solo' : '♻ Hacer todo automático'}
+            </AsyncButton>
+          </div>
+        )}
+        {listaServicios.some(s => s.tipo === 'vigilante' && s.sin_enlace) && (
+          <div className="fs-12" style={{ color: 'var(--warning)' }}>
+            Falta el código de enlace (abajo): sin él, si bore.pub cambia el puerto, el vigilante lo levanta pero FacturaPro no se entera.
           </div>
         )}
       </Card>

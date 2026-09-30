@@ -28,6 +28,7 @@ import random
 import re
 import secrets
 import shutil
+import signal
 import socket
 import string
 import struct
@@ -39,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -58,6 +59,24 @@ PUERTOS_BORE = (20000, 64999)
 
 LOG = []
 _candado_log = threading.Lock()
+_ARCHIVO_LOG = {"ruta": None}
+
+
+class FaltaAdmin(RuntimeError):
+    """La acción necesita la clave de administrador (en Linux se repite con la ventana del sistema)."""
+
+
+def _al_archivo(linea):
+    ruta = _ARCHIVO_LOG["ruta"]
+    if not ruta:
+        return
+    try:
+        if os.path.exists(ruta) and os.path.getsize(ruta) > 1000000:
+            os.replace(ruta, ruta + ".1")
+        with open(ruta, "a", encoding="utf-8") as f:
+            f.write("%s%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), linea))
+    except OSError:
+        pass
 
 
 def log(texto, nivel="info"):
@@ -65,6 +84,7 @@ def log(texto, nivel="info"):
         LOG.append({"hora": time.strftime("%H:%M:%S"), "nivel": nivel, "texto": texto})
     marca = {"ok": "✔", "error": "✖", "aviso": "!", "paso": "»"}.get(nivel, "·")
     linea = "  %s %s" % (marca, texto)
+    _al_archivo(linea)
     try:
         print(linea, flush=True)
     except UnicodeEncodeError:   # consola sin UTF-8 (cmd de Windows): sin símbolos, pero sin caerse
@@ -133,6 +153,10 @@ def usuario_real():
 
 
 def carpeta_datos():
+    # El vigilante arranca como tarea de Windows (SYSTEM) o servicio: recibe --datos con la carpeta del usuario,
+    # si no buscaría la configuración en la carpeta de SYSTEM/root y nunca encontraría el túnel.
+    if os.environ.get("FACPRO_DATOS"):
+        return os.environ["FACPRO_DATOS"]
     if not ES_WINDOWS and usuario_real():
         base = os.path.expanduser("~" + usuario_real())
     else:
@@ -339,6 +363,8 @@ def iniciar_docker():
     if ES_WINDOWS:
         if os.path.exists(DOCKER_DESKTOP_EXE):
             subprocess.Popen([DOCKER_DESKTOP_EXE])
+    elif _MOTOR["nombre"] == "Docker Desktop":
+        run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)
     else:
         run(["systemctl", "start", "docker"], timeout=60)
     for _ in range(45):
@@ -566,7 +592,7 @@ def analizar(pg_elegido=None, minio_elegido=None):
         resultado["conexion"] = {"en_linea": sonda_ssl(BORE_HOST, config["bore_puerto_pg"], 6)}
     resultado["vigilante"] = {"enlace": bool(config.get("enlace_facturapro")), "facturapro": config.get("enlace_url") or "",
                               "informado": config.get("informado") or "", "puerto_informado": config.get("puerto_informado"),
-                              "instalado": vigilante_instalado(), "corriendo": bool(VIGILANTE.get("hilo"))}
+                              "instalado": vigilante_instalado(), "corriendo": bool(vigilante_vivo())}
     return resultado
 
 
@@ -1104,66 +1130,563 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
     return "reparado" if nuevo == puerto else "puerto_nuevo"
 
 
-def vigilar(intervalo=60, vueltas=None):
-    """Revisa el túnel cada `intervalo` segundos (para siempre, o `vueltas` veces)."""
+def vigilar(intervalo=60, vueltas=None, modo="servicio"):
+    """Revisa el túnel cada `intervalo` segundos (para siempre, o `vueltas` veces).
+    Si ya hay otro vigilante vivo (el servicio o la app abierta), no hace nada y devuelve False."""
+    otro = vigilante_vivo()
+    if otro and int(otro["pid"]) != os.getpid():
+        return False
+    _latido(pid=os.getpid(), version=VERSION, modo=modo, desde=time.strftime("%Y-%m-%d %H:%M"), resultado="iniciando")
+    if leer_latido().get("pid") not in (None, os.getpid()):   # otro arrancó en el mismo instante
+        return False
     log("Vigilante del túnel encendido (cada %d s)." % intervalo, "ok")
     estado, n = {"fallos": 0}, 0
     while vueltas is None or n < vueltas:
         try:
-            vuelta_vigilante(estado)
+            r = vuelta_vigilante(estado)
+            _latido(resultado=r, puerto=leer_config().get("bore_puerto_pg"))
         except Exception as e:  # noqa: BLE001 - el vigilante no se detiene por un error
             log("Vigilante: %s" % e, "error")
+            _latido(resultado="error: %s" % str(e)[:120])
         n += 1
         if vueltas is None or n < vueltas:
             time.sleep(intervalo)
+    return True
+
+
+def _ejecutable_estable():
+    """El programa compilado se copia a la carpeta de datos y el arranque automático usa esa copia: la AppImage se
+    monta en una carpeta temporal que desaparece, y en Windows el instalador no puede reemplazar un .exe en uso."""
+    origen = sys.executable
+    carpeta = os.path.join(carpeta_datos(), "bin")
+    destino = os.path.join(carpeta, "facpro-vigilante" + (".exe" if ES_WINDOWS else ""))
+    if os.path.abspath(origen) == os.path.abspath(destino):
+        return destino
+    try:
+        os.makedirs(carpeta, exist_ok=True)
+        _devolver_dueno(carpeta)
+        if (not os.path.exists(destino) or os.path.getsize(destino) != os.path.getsize(origen)
+                or int(os.path.getmtime(destino)) != int(os.path.getmtime(origen))):
+            temporal = destino + ".nuevo"
+            shutil.copy2(origen, temporal)
+            os.replace(temporal, destino)
+            if not ES_WINDOWS:
+                os.chmod(destino, 0o755)
+            _devolver_dueno(destino)
+        return destino
+    except OSError:   # la copia vieja está corriendo (Windows): se sigue usando
+        return destino if os.path.exists(destino) else origen
+
+
+def _comando_base():
+    if getattr(sys, "frozen", False):
+        return [_ejecutable_estable()]
+    python = sys.executable
+    if ES_WINDOWS and os.path.exists(os.path.join(os.path.dirname(python), "pythonw.exe")):
+        python = os.path.join(os.path.dirname(python), "pythonw.exe")   # sin ventana negra
+    return [python, os.path.abspath(__file__)]
 
 
 def _comando_vigilante():
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--vigilar"]
-    return [sys.executable, os.path.abspath(__file__), "--vigilar"]
+    return _comando_base() + ["--datos", carpeta_datos(), "--vigilar"]
+
+
+UNIDAD = "facpro-vigilante"
+
+
+def _unidad_usuario():
+    casa = os.path.expanduser("~" + usuario_real()) if (not ES_WINDOWS and usuario_real()) else os.path.expanduser("~")
+    return os.path.join(casa, ".config", "systemd", "user", UNIDAD + ".service")
+
+
+def _linea_systemd(partes):
+    def q(p):
+        p = p.replace("%", "%%")
+        return '"%s"' % p.replace("\\", "\\\\").replace('"', '\\"') if re.search(r"[\s\"'\\;]", p) else p
+    return " ".join(q(p) for p in partes)
+
+
+def _linea_cron(partes):
+    import shlex
+    return " ".join(shlex.quote(p) for p in partes).replace("%", "\\%")
+
+
+def _es_admin_windows():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _xml_tarea(comando, sistema):
+    """Tarea de Windows que NO se detiene a las 72 h (el límite de schtasks), se reintenta si falla y revisa cada
+    5 minutos que el vigilante siga vivo (si ya corre, la tarea nueva no hace nada)."""
+    from xml.sax.saxutils import escape
+    usuario = "\\".join(x for x in (os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", "")) if x)
+    disparadores = ["<LogonTrigger><Enabled>true</Enabled>%s</LogonTrigger>" % ("" if sistema else "<UserId>%s</UserId>" % escape(usuario)),
+                    "<TimeTrigger><Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>"
+                    "<StartBoundary>2024-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>"]
+    if sistema:
+        disparadores.insert(0, "<BootTrigger><Enabled>true</Enabled></BootTrigger>")
+    principal = ("<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>" if sistema else
+                 "<UserId>%s</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>" % escape(usuario))
+    return ('<?xml version="1.0" encoding="UTF-16"?>\n'
+            '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+            "<RegistrationInfo><Description>Vigila el túnel bore de FacPro y lo levanta si se cae.</Description></RegistrationInfo>"
+            "<Triggers>%s</Triggers>"
+            '<Principals><Principal id="Author">%s</Principal></Principals>'
+            "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+            "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Hidden>true</Hidden><StartWhenAvailable>true</StartWhenAvailable>"
+            "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>"
+            "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled></Settings>"
+            '<Actions Context="Author"><Exec><Command>%s</Command><Arguments>%s</Arguments></Exec></Actions></Task>'
+            ) % ("".join(disparadores), principal, escape(comando[0]), escape(subprocess.list2cmdline(comando[1:])))
+
+
+def _programa_de(texto):
+    """Ruta del programa que ejecuta una tarea/servicio/cron ya instalado (para saber si sigue existiendo)."""
+    m = (re.search(r"<Command>([^<]+)</Command>", texto or "") or re.search(r'ExecStart="([^"]+)"', texto or "")
+         or re.search(r"ExecStart=(\S+)", texto or "") or re.search(r"'([^']+)'[^\n]*--vigilar", texto or "")
+         or re.search(r"(\S+)[^\n]*--vigilar", texto or ""))
+    return m.group(1).replace("&amp;", "&").replace("\\\\", "\\") if m else ""
+
+
+def _cron_actual():
+    return (run(["crontab", "-l"], timeout=20)[1] or "") if shutil.which("crontab") else ""
+
+
+def vigilante_info():
+    """¿Está instalado el arranque automático del vigilante? cómo, y si hay que actualizarlo."""
+    texto, info = "", {"instalado": False, "como": "", "viejo": False}
+    if ES_WINDOWS:
+        code, out = run(["schtasks", "/Query", "/TN", TAREA_WINDOWS, "/XML"], timeout=20)
+        if code == 0:
+            texto = out
+            info.update(instalado=True, como="tarea de Windows (%s)" % ("al encender el equipo" if "S-1-5-18" in out else "al iniciar sesión"),
+                        viejo="PT0S" not in out)   # la de la 1.4 se detenía a las 72 h y no se reiniciaba
+    elif os.path.exists(SERVICIO_LINUX):
+        texto = io_leer(SERVICIO_LINUX)
+        info.update(instalado=True, como="servicio del sistema (%s)" % UNIDAD, viejo="--datos" not in texto)
+    elif os.path.exists(_unidad_usuario()):
+        texto = io_leer(_unidad_usuario())
+        info.update(instalado=True, como="servicio de tu usuario (%s)" % UNIDAD, viejo="--datos" not in texto)
+    else:
+        cron = "\n".join(l for l in _cron_actual().splitlines() if "--vigilar" in l)
+        if cron:
+            texto = cron
+            info.update(instalado=True, como="cron", viejo="*/5" not in cron)
+    programa = _programa_de(texto)
+    if info["instalado"] and programa and not os.path.exists(programa):
+        info["viejo"] = True     # apunta a un programa que ya no existe (p. ej. una AppImage montada)
+    info["programa"] = programa
+    return info
+
+
+def io_leer(ruta):
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
 
 
 def vigilante_instalado():
-    if ES_WINDOWS:
-        return run(["schtasks", "/Query", "/TN", TAREA_WINDOWS], timeout=20)[0] == 0
-    return os.path.exists(SERVICIO_LINUX) or "facpro_servidor" in (run(["crontab", "-l"], timeout=20)[1] or "")
+    return vigilante_info()["instalado"]
+
+
+def _systemd_usuario_disponible():
+    return (not ES_WINDOWS and bool(shutil.which("systemctl")) and os.geteuid() != 0
+            and run(["systemctl", "--user", "show-environment"], timeout=15)[0] == 0)
 
 
 def instalar_vigilante():
-    """Que el vigilante arranque solo con el equipo (tarea de Windows / servicio systemd / cron @reboot)."""
+    """Que el vigilante arranque solo y, si se cae, vuelva a arrancar (tarea de Windows / servicio systemd / cron)."""
+    _detener_vigilante()
     comando = _comando_vigilante()
     if ES_WINDOWS:
-        tr = " ".join('"%s"' % p if " " in p else p for p in comando)
-        code, out = run(["schtasks", "/Create", "/F", "/SC", "ONSTART", "/RU", "SYSTEM", "/TN", TAREA_WINDOWS, "/TR", tr], timeout=30)
-        if code != 0:   # sin permisos de administrador: al iniciar sesión
-            code, out = run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", TAREA_WINDOWS, "/TR", tr], timeout=30)
+        ruta = os.path.join(carpeta_datos(), "tarea-vigilante.xml")
+        os.makedirs(carpeta_datos(), exist_ok=True)
+        for sistema in ((True, False) if _es_admin_windows() else (False,)):
+            with open(ruta, "w", encoding="utf-16") as f:
+                f.write(_xml_tarea(comando, sistema))
+            code, out = run(["schtasks", "/Create", "/F", "/TN", TAREA_WINDOWS, "/XML", ruta], timeout=30)
+            if code == 0:
+                break
+        try:
+            os.remove(ruta)
+        except OSError:
+            pass
         if code != 0:
             raise RuntimeError("No se pudo crear la tarea de Windows: %s" % out[-200:])
-        log("El vigilante arrancará solo con Windows (tarea «%s»)." % TAREA_WINDOWS, "ok")
-        return {"ok": True, "como": "tarea de Windows"}
+        run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=20)
+        como = "al encender el equipo" if sistema else "al iniciar sesión"
+        log("El vigilante arranca solo (%s), se reinicia si falla y se revisa cada 5 minutos." % como, "ok")
+        return {"ok": True, "como": "tarea de Windows (%s)" % como}
     if os.geteuid() == 0 and shutil.which("systemctl"):
-        texto = ("[Unit]\nDescription=FacPro Servidor - vigilante del tunel\nAfter=network-online.target docker.service\n"
-                 "Wants=network-online.target\n\n[Service]\nExecStart=%s\nRestart=always\nRestartSec=30\n%s\n"
-                 "[Install]\nWantedBy=multi-user.target\n") % (" ".join(comando),
+        texto = ("[Unit]\nDescription=FacPro - vigilante del tunel bore\nAfter=network-online.target docker.service\n"
+                 "Wants=network-online.target\n\n[Service]\nExecStart=%s\nRestart=always\nRestartSec=60\n%s\n"
+                 "[Install]\nWantedBy=multi-user.target\n") % (_linea_systemd(comando),
                                                                ("User=%s\n" % usuario_real()) if usuario_real() else "")
         with open(SERVICIO_LINUX, "w", encoding="utf-8") as f:
             f.write(texto)
         run(["systemctl", "daemon-reload"])
-        code, out = run(["systemctl", "enable", "--now", "facpro-vigilante"])
+        run(["systemctl", "restart", UNIDAD])
+        code, out = run(["systemctl", "enable", "--now", UNIDAD])
         if code != 0:
             raise RuntimeError("No se pudo activar el servicio: %s" % out[-200:])
-        log("El vigilante quedó como servicio del sistema (facpro-vigilante).", "ok")
-        return {"ok": True, "como": "servicio systemd"}
-    linea = "@reboot %s >> %s 2>&1" % (" ".join(comando), os.path.join(carpeta_datos(), "vigilante.log"))
-    actual = run(["crontab", "-l"], timeout=20)[1] if shutil.which("crontab") else ""
-    if linea not in (actual or ""):
-        nuevo = "\n".join(l for l in (actual or "").splitlines() if "facpro_servidor" not in l and "--vigilar" not in l) + "\n" + linea + "\n"
-        code, out = run(["crontab", "-"], entrada=nuevo, timeout=20)
+        log("El vigilante quedó como servicio del sistema (%s): arranca con el equipo y se reinicia si se cae." % UNIDAD, "ok")
+        return {"ok": True, "como": "servicio del sistema"}
+    if _systemd_usuario_disponible():
+        unidad = _unidad_usuario()
+        os.makedirs(os.path.dirname(unidad), exist_ok=True)
+        with open(unidad, "w", encoding="utf-8") as f:
+            f.write("[Unit]\nDescription=FacPro - vigilante del tunel bore\n\n[Service]\nExecStart=%s\nRestart=always\n"
+                    "RestartSec=60\n\n[Install]\nWantedBy=default.target\n" % _linea_systemd(comando))
+        run(["systemctl", "--user", "daemon-reload"])
+        run(["systemctl", "--user", "restart", UNIDAD])
+        code, out = run(["systemctl", "--user", "enable", "--now", UNIDAD])
         if code != 0:
-            raise RuntimeError("No se pudo programar el arranque (crontab): %s" % out[-200:])
-    log("El vigilante arrancará solo al encender el equipo (cron @reboot).", "ok")
+            raise RuntimeError("No se pudo activar el servicio: %s" % out[-200:])
+        # linger: el servicio del usuario arranca con el equipo aunque nadie inicie sesión
+        con_equipo = run(["loginctl", "enable-linger"], timeout=20)[0] == 0 if shutil.which("loginctl") else False
+        log("El vigilante quedó como servicio de tu usuario (%s), se reinicia si se cae y arranca %s." %
+            (UNIDAD, "con el equipo" if con_equipo else "al iniciar sesión"), "ok")
+        return {"ok": True, "como": "servicio de tu usuario"}
+    if not shutil.which("crontab"):
+        raise FaltaAdmin("Este equipo no tiene systemd de usuario ni cron: hace falta la clave de administrador.")
+    linea = _linea_cron(comando) + " >/dev/null 2>&1"
+    quedan = [l for l in _cron_actual().splitlines() if "facpro_servidor" not in l and "--vigilar" not in l]
+    code, out = run(["crontab", "-"], entrada="\n".join(quedan + ["@reboot " + linea, "*/5 * * * * " + linea]) + "\n", timeout=20)
+    if code != 0:
+        raise RuntimeError("No se pudo programar el arranque (crontab): %s" % out[-200:])
+    log("El vigilante arranca con el equipo y cada 5 minutos se revisa que siga vivo (cron).", "ok")
     return {"ok": True, "como": "cron"}
+
+
+def quitar_vigilante():
+    """Quita el arranque automático del vigilante y lo detiene."""
+    if ES_WINDOWS:
+        if vigilante_info()["instalado"]:
+            run(["schtasks", "/End", "/TN", TAREA_WINDOWS], timeout=20)
+            code, out = run(["schtasks", "/Delete", "/F", "/TN", TAREA_WINDOWS], timeout=30)
+            if code != 0:
+                raise RuntimeError("No se pudo quitar la tarea (si se instaló como administrador, abre la app como administrador): %s" % out[-200:])
+    else:
+        if os.path.exists(SERVICIO_LINUX):
+            if os.geteuid() != 0:
+                raise FaltaAdmin("El vigilante es un servicio del sistema: hace falta la clave de administrador para quitarlo.")
+            run(["systemctl", "disable", "--now", UNIDAD])
+            os.remove(SERVICIO_LINUX)
+            run(["systemctl", "daemon-reload"])
+        if os.geteuid() != 0 and os.path.exists(_unidad_usuario()):
+            run(["systemctl", "--user", "disable", "--now", UNIDAD])
+            os.remove(_unidad_usuario())
+            run(["systemctl", "--user", "daemon-reload"])
+        cron = _cron_actual()
+        if "--vigilar" in cron:
+            quedan = [l for l in cron.splitlines() if "facpro_servidor" not in l and "--vigilar" not in l]
+            run(["crontab", "-"], entrada="\n".join(quedan) + "\n", timeout=20)
+    _detener_vigilante()
+    log("Vigilante quitado: si el túnel se cae, nadie lo levantará solo.", "aviso")
+    return {"ok": True}
+
+
+# ── Una sola copia del vigilante a la vez (latido en vigilante.json) ──
+
+ARCHIVO_VIGILANTE = "vigilante.json"
+_LATIDO = {}
+
+
+def _proceso_vivo(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if ES_WINDOWS:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k.GetLastError() == 5        # existe, pero es de otro usuario (p. ej. SYSTEM)
+        try:
+            codigo = ctypes.c_ulong()
+            k.GetExitCodeProcess(h, ctypes.byref(codigo))
+            return codigo.value == 259          # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def leer_latido():
+    try:
+        with open(os.path.join(carpeta_datos(), ARCHIVO_VIGILANTE), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _latido(**datos):
+    _LATIDO.update(datos, revisado=time.strftime("%Y-%m-%d %H:%M:%S"), t=time.time())
+    try:
+        os.makedirs(carpeta_datos(), exist_ok=True)
+        ruta = os.path.join(carpeta_datos(), ARCHIVO_VIGILANTE)
+        temporal = "%s.%d" % (ruta, os.getpid())
+        with open(temporal, "w", encoding="utf-8") as f:
+            json.dump(_LATIDO, f)
+        os.replace(temporal, ruta)
+        _devolver_dueno(ruta)
+    except OSError:
+        pass
+
+
+def vigilante_vivo():
+    """El vigilante que corre ahora (servicio, tarea o la app abierta), o None."""
+    l = leer_latido()
+    try:
+        pid, t = int(l.get("pid") or 0), float(l.get("t") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not pid or time.time() - t > 30 * 60:
+        return None
+    if pid == os.getpid():
+        return l if _LATIDO.get("pid") == pid else None
+    return l if _proceso_vivo(pid) else None
+
+
+def _detener_vigilante():
+    """Detiene el vigilante que corre como servicio/tarea (por su PID). Nunca el de la app abierta."""
+    l = vigilante_vivo()
+    if not l or l.get("modo") != "servicio" or int(l["pid"]) == os.getpid():
+        return
+    if ES_WINDOWS:
+        run(["taskkill", "/PID", str(int(l["pid"])), "/F"], timeout=20)
+    else:
+        try:
+            os.kill(int(l["pid"]), signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(1)
+
+
+# ── Servicios automáticos: qué se levanta solo y qué no ──
+
+def _politica(info):
+    return ((info.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") or "no"
+
+
+def _ajustes_docker_desktop():
+    base = os.environ.get("APPDATA", "")
+    return [(os.path.join(base, "Docker", "settings-store.json"), "AutoStart"),
+            (os.path.join(base, "Docker", "settings.json"), "autoStart")]
+
+
+def docker_al_arrancar():
+    """¿Docker se enciende solo? {activo: True/False/None, como}"""
+    if ES_WINDOWS:
+        code, _ = run(["reg", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Docker Desktop"], timeout=15)
+        activo = code == 0
+        for ruta, clave in _ajustes_docker_desktop():
+            try:
+                with open(ruta, encoding="utf-8") as f:
+                    datos = json.load(f)
+                if clave in datos:
+                    activo = activo or bool(datos[clave])
+            except (OSError, ValueError):
+                pass
+        return {"activo": activo, "como": "Docker Desktop al iniciar sesión en Windows"}
+    if not shutil.which("systemctl"):
+        return {"activo": None, "como": "Docker (este Linux no usa systemd)"}
+    if _MOTOR["nombre"] == "Docker Desktop":
+        out = run(["systemctl", "--user", "is-enabled", "docker-desktop"], timeout=15)[1]
+        return {"activo": out.strip() == "enabled", "como": "Docker Desktop (tu usuario)"}
+    if _MOTOR["nombre"].startswith("Docker del usuario"):
+        out = run(["systemctl", "--user", "is-enabled", "docker"], timeout=15)[1]
+        return {"activo": out.strip() == "enabled", "como": "Docker sin root (tu usuario)"}
+    servicio = (run(["systemctl", "is-enabled", "docker"], timeout=15)[1] or "").strip()
+    if servicio == "enabled":
+        return {"activo": True, "como": "servicio docker del sistema"}
+    enchufe = (run(["systemctl", "is-enabled", "docker.socket"], timeout=15)[1] or "").strip()
+    if enchufe == "enabled":
+        return {"activo": True, "como": "servicio docker del sistema (se enciende al usarlo)"}
+    return {"activo": False, "como": "servicio docker del sistema"}
+
+
+def activar_docker_al_arrancar():
+    if ES_WINDOWS:
+        if os.path.exists(DOCKER_DESKTOP_EXE):
+            run(["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Docker Desktop",
+                 "/t", "REG_SZ", "/d", '"%s"' % DOCKER_DESKTOP_EXE, "/f"], timeout=15)
+        for ruta, clave in _ajustes_docker_desktop():
+            try:
+                with open(ruta, encoding="utf-8") as f:
+                    datos = json.load(f)
+                if clave in datos and not datos[clave]:
+                    datos[clave] = True
+                    with open(ruta, "w", encoding="utf-8") as f:
+                        json.dump(datos, f, indent=2)
+            except (OSError, ValueError):
+                pass
+        log("Docker Desktop se abrirá solo al iniciar sesión en Windows.", "ok")
+        return {"ok": True}
+    elegir_docker()
+    if _MOTOR["nombre"] == "Docker Desktop":
+        run(["systemctl", "--user", "enable", "docker-desktop"], timeout=30)
+        run(["loginctl", "enable-linger"], timeout=20)
+    elif _MOTOR["nombre"].startswith("Docker del usuario"):
+        run(["systemctl", "--user", "enable", "docker"], timeout=30)
+        run(["loginctl", "enable-linger"], timeout=20)
+    else:
+        if os.geteuid() != 0:
+            raise FaltaAdmin("Para que Docker arranque con el equipo hace falta la clave de administrador.")
+        code, out = run(["systemctl", "enable", "docker"], timeout=60)
+        if code != 0:
+            raise RuntimeError("No se pudo activar Docker al arrancar: %s" % out[-200:])
+    log("Docker arrancará solo con el equipo.", "ok")
+    return {"ok": True}
+
+
+def hacer_automatico(nombre):
+    """El contenedor se vuelve a levantar solo tras un reinicio o una caída (docker update --restart)."""
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", nombre or ""):
+        raise RuntimeError("Nombre de contenedor inválido.")
+    info = inspeccionar(nombre)
+    if not info:
+        raise RuntimeError("No existe el contenedor «%s»." % nombre)
+    politica = "always" if "bore" in str((info.get("Config") or {}).get("Image") or "") else "unless-stopped"
+    code, out = dk("update", "--restart", politica, nombre)
+    if code != 0:
+        raise RuntimeError("No se pudo cambiar «%s»: %s" % (nombre, out[-200:]))
+    if (info.get("State") or {}).get("Status") != "running":
+        dk("start", nombre)
+    log("«%s» se levanta solo tras reinicios y caídas (%s)." % (nombre, politica), "ok")
+    return {"ok": True}
+
+
+def detener_bore_suelto(pid):
+    """Detiene un bore que corre fuera de Docker (por PID; solo si de verdad es bore)."""
+    if not any(int(p["pid"]) == int(pid) for p in procesos_bore()):
+        raise RuntimeError("Ese proceso ya no es un bore en marcha.")
+    if ES_WINDOWS:
+        run(["taskkill", "/PID", str(int(pid)), "/F"])
+    else:
+        run(["kill", str(int(pid))])
+    log("Se detuvo el bore suelto (pid %s)." % pid, "ok")
+    return {"ok": True}
+
+
+def _hace(segundos):
+    segundos = int(max(0, segundos))
+    if segundos < 90:
+        return "hace %d s" % segundos
+    if segundos < 5400:
+        return "hace %d min" % (segundos // 60)
+    return "hace %d h" % (segundos // 3600)
+
+
+def servicios():
+    """Lista de todo lo que debe levantarse solo para que FacturaPro nunca pierda tu base."""
+    config, lista = leer_config(), []
+    est = docker_estado()
+    d = docker_al_arrancar() if est["instalado"] else {"activo": False, "como": "no está instalado"}
+    lista.append({"id": "docker", "tipo": "docker", "nombre": "Docker", "corriendo": est["corriendo"], "automatico": d["activo"],
+                  "detalle": "%s · %s" % ("encendido" if est["corriendo"] else "apagado", d["como"]),
+                  "accion": "docker-al-arrancar" if est["instalado"] and d["activo"] is False else None})
+    if est["corriendo"]:
+        importantes = {config.get("pg_contenedor"), config.get("minio_contenedor")} - {None, ""}
+        for c in contenedores():
+            es_bore = "bore" in c["imagen"]
+            if not es_bore and c["nombre"] not in importantes:
+                continue
+            info = inspeccionar(c["nombre"])
+            politica = _politica(info)
+            auto = politica in ("always", "unless-stopped")
+            corriendo = c["estado"] == "running"
+            if es_bore:
+                args = list((info.get("Config") or {}).get("Cmd") or [])
+                destino = int(args[args.index("local") + 1]) if "local" in args and args[args.index("local") + 1].isdigit() else None
+                puerto = _puerto_bore_de_logs(c["nombre"])[0] if corriendo else None
+                nombre = "Túnel %s:%s → %s" % (BORE_HOST, puerto or "?", _servicio(destino))
+                tipo = "tunel"
+            else:
+                nombre = ("Base PostgreSQL" if c["nombre"] == config.get("pg_contenedor") else "Archivos MinIO")
+                tipo = "contenedor"
+            lista.append({"id": "c:" + c["nombre"], "tipo": tipo, "nombre": nombre, "contenedor": c["nombre"],
+                          "corriendo": corriendo, "automatico": auto,
+                          "detalle": "%s · %s · %s" % (c["nombre"], "corriendo" if corriendo else c["estado"],
+                                                       "se levanta solo" if auto else "NO se levanta solo tras un reinicio"),
+                          "accion": None if auto and corriendo else "automatico"})
+    for p in procesos_bore():
+        lista.append({"id": "p:%s" % p["pid"], "tipo": "suelto", "nombre": "bore fuera de Docker (puerto %s)" % (p.get("puerto") or "?"),
+                      "pid": p["pid"], "corriendo": True, "automatico": False,
+                      "detalle": "Lanzado a mano: se pierde al reiniciar. «Configurar todo» lo reemplaza por un túnel en Docker.",
+                      "accion": "detener-suelto"})
+    vig, vivo = vigilante_info(), vigilante_vivo()
+    if vivo:
+        quien = {"app": "la app abierta", "servicio": "el servicio"}.get(vivo.get("modo"), vivo.get("modo") or "?")
+        estado = "corriendo en %s · revisó %s (%s)" % (quien, _hace(time.time() - float(vivo.get("t") or 0)), vivo.get("resultado") or "")
+    else:
+        estado = "no está corriendo"
+    if vig["instalado"]:
+        detalle = "Arranca solo: %s%s · %s" % (vig["como"], " — hay que actualizarlo" if vig.get("viejo") else "", estado)
+    else:
+        detalle = "No arranca solo: si el túnel se cae con la app cerrada, nadie lo levanta · %s" % estado
+    lista.append({"id": "vigilante", "tipo": "vigilante", "nombre": "Vigilante del túnel", "corriendo": bool(vivo),
+                  "automatico": vig["instalado"] and not vig.get("viejo"), "instalado": vig["instalado"],
+                  "sin_enlace": not config.get("enlace_facturapro"), "detalle": detalle,
+                  "accion": "vigilante" if (not vig["instalado"] or vig.get("viejo")) else None})
+    pendientes = [x for x in lista if x["automatico"] is False]
+    return {"servicios": lista, "todo_automatico": not pendientes, "pendientes": len(pendientes)}
+
+
+def automatizar(accion, objetivo=None, pedir_admin=None):
+    """Hace automático un servicio de la lista (o todos con accion='todo').
+    pedir_admin(bandera): repite como administrador lo que lo necesite (Linux: ventana de clave del sistema)."""
+    def con_admin(funcion, bandera, *args):
+        try:
+            return funcion(*args)
+        except FaltaAdmin as e:
+            if not pedir_admin:
+                raise
+            log("%s Se pide la clave del sistema…" % e, "paso")
+            pedir_admin(bandera)
+            return {"ok": True}
+
+    if accion == "automatico":
+        return hacer_automatico(objetivo)
+    if accion == "docker-al-arrancar":
+        return con_admin(activar_docker_al_arrancar, "--docker-al-arrancar")
+    if accion == "vigilante":
+        return con_admin(instalar_vigilante, "--instalar-vigilante")
+    if accion == "quitar-vigilante":
+        return con_admin(quitar_vigilante, "--quitar-vigilante")
+    if accion == "detener-suelto":
+        return detener_bore_suelto(objetivo)
+    if accion != "todo":
+        raise RuntimeError("Acción desconocida: %s" % accion)
+    hechos, fallos = 0, []
+    for x in servicios()["servicios"]:
+        if not x.get("accion") or x["accion"] == "detener-suelto":
+            continue
+        try:
+            automatizar(x["accion"], x.get("contenedor"), pedir_admin)
+            hechos += 1
+        except Exception as e:  # noqa: BLE001 - se sigue con los demás
+            fallos.append("%s: %s" % (x["nombre"], e))
+            log("%s: %s" % (x["nombre"], e), "error")
+    if fallos:
+        raise RuntimeError("Quedaron %d sin hacer automáticos: %s" % (len(fallos), "; ".join(fallos)))
+    log("Todo queda automático (%d cambio%s)." % (hechos, "" if hechos == 1 else "s") if hechos else "Ya estaba todo automático.", "ok")
+    return {"ok": True, "hechos": hechos}
 
 
 # ─────────────────────────────── interfaz web (solo este equipo) ───────────────────────────────
@@ -1173,10 +1696,18 @@ VIGILANTE = {"hilo": None}
 
 
 def encender_vigilante_aqui():
-    """Mientras esta ventana siga abierta, también vigila (la tarea/servicio lo hace tras reiniciar)."""
-    if VIGILANTE["hilo"] is None:
-        VIGILANTE["hilo"] = threading.Thread(target=vigilar, daemon=True)
-        VIGILANTE["hilo"].start()
+    """Mientras esta ventana siga abierta, también vigila (la tarea/servicio lo hace tras reiniciar).
+    Si el servicio ya vigila, espera: toma el relevo si el servicio se detiene."""
+    if VIGILANTE["hilo"] is not None:
+        return
+
+    def turno():
+        while True:
+            if not vigilar(modo="app"):
+                time.sleep(300)
+
+    VIGILANTE["hilo"] = threading.Thread(target=turno, daemon=True)
+    VIGILANTE["hilo"].start()
 TOKEN = secrets.token_urlsafe(24)
 
 
@@ -2059,6 +2590,10 @@ def main(argv=None):
         except Exception:
             pass
     args = list(sys.argv[1:] if argv is None else argv)
+    if "--datos" in args:
+        i = args.index("--datos")
+        if i + 1 < len(args):
+            os.environ["FACPRO_DATOS"] = args[i + 1]
     if "--version" in args:
         print(VERSION)
         return 0
@@ -2082,7 +2617,25 @@ def main(argv=None):
             print("  ✖ %s" % e)
             return 1
     if "--vigilar" in args:
+        _ARCHIVO_LOG["ruta"] = os.path.join(carpeta_datos(), "vigilante.log")
+        if ES_WINDOWS and getattr(sys, "frozen", False):
+            try:   # la tarea de Windows no debe dejar una ventana negra abierta
+                import ctypes
+                ctypes.windll.kernel32.FreeConsole()
+            except Exception:
+                pass
         vigilar()
+        return 0
+    for bandera, funcion in (("--quitar-vigilante", quitar_vigilante), ("--docker-al-arrancar", activar_docker_al_arrancar)):
+        if bandera in args:
+            try:
+                funcion()
+                return 0
+            except RuntimeError as e:
+                print("  ✖ %s" % e)
+                return 1
+    if "--servicios" in args:
+        print(json.dumps(servicios(), ensure_ascii=False, indent=2))
         return 0
     if "--instalar-docker" in args:
         try:

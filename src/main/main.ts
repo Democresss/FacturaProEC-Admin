@@ -22,6 +22,11 @@ let tray: Tray | null = null;
 let bridgeProcess: ChildProcess | null = null;
 let bridgePort: number | null = null;
 let isQuitting = false;
+let avisoBandeja = false;
+
+// Nombre visible. El nombre interno (productName «FacturaProEC Admin») no cambia: de él dependen la carpeta de
+// instalación, los datos guardados y las actualizaciones automáticas.
+const NOMBRE = 'FacPro Server Manager';
 
 const isDev = !app.isPackaged;
 const ROOT = app.getAppPath();
@@ -188,7 +193,7 @@ function createWindow() {
     minHeight: 640,
     show: false,
     backgroundColor: '#0f172a',
-    title: 'FacturaProEC Admin',
+    title: NOMBRE,
     icon: resolveIcon(),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
@@ -232,7 +237,10 @@ function createWindow() {
     if (!isQuitting) {
       e.preventDefault();
       mainWindow?.hide();
-      showNotification('FacturaProEC Admin', 'La app sigue corriendo en segundo plano (icono de bandeja).');
+      if (!avisoBandeja) {
+        avisoBandeja = true;
+        showNotification(NOMBRE, 'Sigue trabajando en segundo plano (icono de la bandeja): vigila el túnel.');
+      }
     }
   });
 
@@ -274,7 +282,7 @@ function createTray() {
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
 
   const menu = Menu.buildFromTemplate([
-    { label: 'Mostrar FacturaProEC', click: () => showMainWindow() },
+    { label: `Abrir ${NOMBRE}`, click: () => showMainWindow() },
     { type: 'separator' },
     {
       label: 'Tema',
@@ -285,10 +293,10 @@ function createTray() {
       ],
     },
     { type: 'separator' },
-    { label: 'Salir', click: () => quitApp() },
+    { label: 'Salir (el túnel sigue; el vigilante también si lo instalaste)', click: () => quitApp() },
   ]);
 
-  tray.setToolTip('FacturaProEC Admin');
+  tray.setToolTip(`${NOMBRE} — trabajando en segundo plano`);
   tray.setContextMenu(menu);
   tray.on('click', () => showMainWindow());
 }
@@ -345,7 +353,7 @@ function setAutostart(enable: boolean): { ok: boolean; message: string } {
       if (enable) {
         fs.mkdirSync(dir, { recursive: true });
         const exec = process.env.APPIMAGE || process.execPath;
-        fs.writeFileSync(file, ['[Desktop Entry]', 'Type=Application', 'Name=FacturaProEC Admin',
+        fs.writeFileSync(file, ['[Desktop Entry]', 'Type=Application', `Name=${NOMBRE}`,
           `Exec="${exec}" --hidden`, 'Terminal=false', 'X-GNOME-Autostart-enabled=true', ''].join('\n'));
       } else if (fs.existsSync(file)) {
         fs.unlinkSync(file);
@@ -358,11 +366,33 @@ function setAutostart(enable: boolean): { ok: boolean; message: string } {
                       'FacturaProECStorageManager', '/f'], { windowsHide: true }).on('error', () => {});
       }
     }
-    return { ok: true, message: enable ? 'FacturaProEC Admin arrancará al iniciar sesión (en la bandeja)'
+    return { ok: true, message: enable ? `${NOMBRE} arrancará al iniciar sesión (en la bandeja)`
                                        : 'Arranque automático desactivado' };
   } catch (e: any) {
     return { ok: false, message: String(e?.message || e) };
   }
+}
+
+function getAutostart(): boolean {
+  try {
+    if (process.platform === 'linux') {
+      return fs.existsSync(path.join(app.getPath('home'), '.config', 'autostart', 'facturaproec-admin.desktop'));
+    }
+    return app.getLoginItemSettings({ args: ['--hidden'] }).openAtLogin;
+  } catch {
+    return false;
+  }
+}
+
+/** Novedades de la versión nueva (el texto del release de GitHub) como lista de líneas de texto plano. */
+function notasDe(info: any): string[] {
+  let n = info?.releaseNotes;
+  if (Array.isArray(n)) n = n.map((x: any) => x?.note || '').join('\n');
+  if (typeof n !== 'string') return [];
+  const texto = n.replace(/<\/(li|p|h\d)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  return texto.split('\n').map(l => l.replace(/^\s*(#+|[-*•])\s*/, '').replace(/\*\*/g, '').trim())
+    .filter(l => l.length > 1).slice(0, 20);
 }
 
 /* ───────────── IPC handlers ───────────── */
@@ -387,6 +417,8 @@ function setupIpc() {
 
   ipcMain.handle('app:quit', () => quitApp());
   ipcMain.handle('autostart:set', (_e, enable: boolean) => setAutostart(!!enable));
+  ipcMain.handle('autostart:get', () => getAutostart());
+  ipcMain.handle('app:version', () => app.getVersion());
 
   ipcMain.handle('notify', (_e, title: string, body: string) => {
     showNotification(title, body);
@@ -438,7 +470,7 @@ function setupAutoUpdater() {
   });
   autoUpdater.on('update-available', (info: any) => {
     console.log(`[update] Disponible v${info.version} — descargando…`);
-    mainWindow?.webContents.send('update:status', { state: 'available', version: info.version });
+    mainWindow?.webContents.send('update:status', { state: 'available', version: info.version, notas: notasDe(info) });
     // No usamos Notification del SO para updates: el renderer muestra un modal
     // con barra de progreso dentro de la app. Solo avisamos por SO si la app
     // está minimizada a bandeja (para no romper la UX).
@@ -453,7 +485,7 @@ function setupAutoUpdater() {
   });
   autoUpdater.on('update-downloaded', (info: any) => {
     console.log(`[update] v${info.version} descargada — reiniciar para instalar.`);
-    mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version });
+    mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version, notas: notasDe(info) });
     // Si la ventana está oculta (minimizada a bandeja), avisar por SO una sola vez.
     if (!mainWindow || !mainWindow.isVisible()) {
       showNotification('Actualización lista', `Reinicia para instalar v${info.version}.`);

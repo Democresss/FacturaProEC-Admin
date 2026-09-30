@@ -5,15 +5,18 @@ import { Modal } from './Modal';
  * UpdateModal — Modal in-app para el auto-update.
  *
  * Escucha los eventos que el main process envía via IPC:
- *   - 'update:status'  → { state: 'available'|'downloaded'|'error'|..., version }
+ *   - 'update:status'  → { state: 'available'|'downloaded'|'error'|..., version, notas }
  *   - 'update:progress' → { percent: 0-100 }
  *
  * Se monta automáticamente cuando hay una actualización disponible,
  * SIN usar Notification del SO (eso lo pediste explícito: modal dentro del programa,
- * no notificaciones Windows cada rato).
+ * no notificaciones Windows cada rato). Muestra la lista de novedades de la versión nueva.
  *
  * El modal NO se puede cerrar si está descargando (no tiene sentido). Si ya se
  * descargó, el botón "Reiniciar y actualizar" ejecuta `update:install` del preload.
+ *
+ * Todos los hooks van ANTES de cualquier `return`: antes había useCallback después de
+ * `if (!visible) return null` y React se caía (error #310) justo al llegar una actualización.
  */
 
 type UpdateState = 'idle' | 'checking' | 'available' | 'downloaded' | 'up-to-date' | 'error';
@@ -22,6 +25,7 @@ interface StatusPayload {
   state: UpdateState;
   version?: string;
   message?: string;
+  notas?: string[];
 }
 
 interface ProgressPayload {
@@ -34,6 +38,7 @@ export function UpdateModal() {
   const [percent, setPercent] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [notas, setNotas] = useState<string[]>([]);
 
   const reset = useCallback(() => {
     setState('idle');
@@ -42,6 +47,17 @@ export function UpdateModal() {
     setDismissed(false);
     setErrorMsg(null);
   }, []);
+
+  const handleInstall = useCallback(async () => {
+    const ea = (window as any).electronAPI;
+    try { await ea?.update?.install(); } catch { /* el main lo instala */ }
+  }, []);
+
+  const handleDismiss = useCallback(() => {
+    if (state === 'available') return; // No dejar cerrar mientras descarga
+    setDismissed(true);
+    if (state === 'error') reset();
+  }, [state, reset]);
 
   useEffect(() => {
     const ea = (window as any).electronAPI;
@@ -55,6 +71,7 @@ export function UpdateModal() {
         return;
       }
       const p = payload as StatusPayload;
+      if (Array.isArray(p.notas) && p.notas.length) setNotas(p.notas.filter(n => typeof n === 'string').slice(0, 20));
       if (p.state) {
         if (p.state === 'available') {
           // Nueva versión detectada → mostramos el modal, reseteamos dismiss.
@@ -80,28 +97,12 @@ export function UpdateModal() {
 
   // No mostrar nada si está al día, idle o descartado mientras no haya update.
   const open = state === 'available' || state === 'downloaded' || state === 'error';
-  const visible = open && !dismissed;
-  if (!visible) return null;
+  if (!open || dismissed) return null;
 
-  // Para 'available' el backend está descargando (autoDownload=true), mostramos progreso.
-  // Para 'downloaded' ya está listo para instalar.
-  // Para 'error' mostramos qué pasó y posponer.
-
-  let title: React.ReactNode;
+  let title: string;
   if (state === 'available') title = `⬇ Actualizando a la nueva versión${version ? ' v' + version : ''}…`;
   else if (state === 'downloaded') title = `✓ Actualización lista${version ? ' v' + version : ''}`;
   else title = '⚠ Error de actualización';
-
-  const handleInstall = useCallback(async () => {
-    const ea = (window as any).electronAPI;
-    try { await ea?.update?.install(); } catch { /* el main lo instala */ }
-  }, []);
-
-  const handleDismiss = useCallback(() => {
-    if (state === 'available') return; // No dejar cerrar mientras descarga
-    setDismissed(true);
-    if (state === 'error') reset();
-  }, [state, reset]);
 
   // El footer depende del estado.
   let footer: React.ReactNode = null;
@@ -113,22 +114,26 @@ export function UpdateModal() {
       </>
     );
   } else if (state === 'error') {
-    footer = (
-      <>
-        <button className="btn" onClick={reset}>Cerrar</button>
-      </>
-    );
+    footer = <button className="btn" onClick={reset}>Cerrar</button>;
   }
   // En 'available' (descargando): sin footer, el botón ✕ está deshabilitado en el header.
 
   const downloading = state === 'available';
+  const novedades = state !== 'error' && notas.length > 0 && (
+    <div style={{ marginTop: 14 }}>
+      <div className="fw-700 fs-13" style={{ marginBottom: 6 }}>Novedades</div>
+      <ul style={{ margin: 0, paddingLeft: 18, maxHeight: 220, overflow: 'auto', fontSize: 13 }}>
+        {notas.map((n, i) => <li key={i} style={{ marginBottom: 4 }}>{n}</li>)}
+      </ul>
+    </div>
+  );
 
   return (
     <Modal
       open={true}
-      title={title as string}
+      title={title}
       onClose={downloading ? () => {} : handleDismiss}
-      maxWidth={480}
+      maxWidth={520}
       footer={footer}
     >
       {downloading && (
@@ -143,6 +148,7 @@ export function UpdateModal() {
             <span>{percent}%</span>
             <span>Se instalará al reiniciar</span>
           </div>
+          {novedades}
         </div>
       )}
       {state === 'downloaded' && (
@@ -152,18 +158,19 @@ export function UpdateModal() {
             Al reiniciar, se aplicará automáticamente.
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            Guardá tus cambios antes de continuar.
+            El túnel sigue en línea mientras se actualiza (corre en Docker, no dentro de la app).
           </div>
+          {novedades}
         </div>
       )}
       {state === 'error' && (
         <div className="updater-body">
           <div style={{ marginBottom: 8 }}>No se pudo completar la actualización:</div>
-          <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--bg-sunken)', padding: 8, borderRadius: 6 }}>
+          <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--bg-input)', padding: 8, borderRadius: 6 }}>
 {errorMsg || 'Error desconocido'}
           </pre>
           <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-            Podés cerrar e intentarlo más tarde (la app revisará otra vez al reiniciar).
+            Puedes cerrar e intentarlo más tarde (la app revisará otra vez al reiniciar).
           </div>
         </div>
       )}

@@ -78,6 +78,10 @@ def main():
         c(st == 200 and json.loads(cuerpo).get("en_claro") == 0, "Seguridad: las claves guardadas están cifradas", cuerpo[:120])
         st, _, cuerpo = pedir(base + "/api/servidor/progreso", clave)
         c(st == 200 and json.loads(cuerpo).get("ok"), "«Servidor y túnel»: progreso")
+        st, _, cuerpo = pedir(base + "/api/servidor/servicios", clave)
+        datos = json.loads(cuerpo) if st == 200 else {}
+        ids = [x.get("id") for x in ((datos.get("data") or {}).get("servicios") or [])]
+        c(st == 200 and datos.get("ok") and "docker" in ids and "vigilante" in ids, "Servicios automáticos: lista Docker y vigilante", ids)
     finally:
         proc.kill()
         try:

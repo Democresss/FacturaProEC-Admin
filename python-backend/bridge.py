@@ -98,13 +98,15 @@ async def lifespan(app_: FastAPI):
     _guardian_thread = threading.Thread(target=_guardian_loop, daemon=True)
     _guardian_thread.start()
     logger.info("Guardian loop iniciado")
+    from servidor_api import arrancar_vigilante_de_la_app
+    arrancar_vigilante_de_la_app()
     yield
     _guardian_stop.set()
     get_cm().dispose()
     logger.info("Bridge cerrado")
 
 
-app = FastAPI(title="FacturaProEC Admin Bridge", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="FacPro Server Manager Bridge", version="2.3.0", lifespan=lifespan)
 # Antes: allow_origins=["*"] y sin clave. Cualquier página web abierta en el navegador podía encontrar el
 # puerto en 127.0.0.1 y usar el backend (consultas SQL a la base, firewall…). Ahora solo la ventana de la
 # app: su origen (file:// → "null", o el Vite de desarrollo) y la clave que el proceso main le pasa.

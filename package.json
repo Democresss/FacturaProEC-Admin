@@ -1,7 +1,7 @@
 {
   "name": "facturaproec-admin",
-  "version": "2.2.0",
-  "description": "FacturaProEC Admin Tool - Local DB, Files, Servidor y túnel",
+  "version": "2.3.0",
+  "description": "FacPro Server Manager - base de datos, túnel bore y servicios automáticos para FacturaPro",
   "author": "Democresss",
   "license": "MIT",
   "main": "dist/main/main.js",
@@ -162,10 +162,10 @@
       "artifactName": "FacturaProEC-Admin-${version}-${os}-${arch}.${ext}",
       "category": "Office",
       "maintainer": "FacturaProEC <jairloorramirez@gmail.com>",
-      "synopsis": "Administra la base de datos, archivos y el túnel de tu empresa para FacturaPro",
+      "synopsis": "Tu base de datos, el túnel y los servicios automáticos para FacturaPro",
       "executableName": "facturaproec-admin",
       "desktop": {
-        "Name": "FacturaProEC Admin",
+        "Name": "FacPro Server Manager",
         "Comment": "Base de datos, archivos y túnel para FacturaPro",
         "Categories": "Office;Utility;"
       }
@@ -175,8 +175,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "FacturaProEC Admin",
-      "uninstallDisplayName": "FacturaProEC Admin",
+      "shortcutName": "FacPro Server Manager",
+      "uninstallDisplayName": "FacPro Server Manager",
       "include": "build/installer.nsh",
       "deleteAppDataOnUninstall": false,
       "differentialPackage": false

@@ -4,6 +4,7 @@ import { useTheme } from './hooks/useTheme';
 import { ToastProvider, useToast } from './components/Toast';
 import { CommandPalette, CommandItem } from './components/CommandPalette';
 import { UpdateModal } from './components/UpdateModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { DashboardView } from './views/Dashboard';
 import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
@@ -81,7 +82,7 @@ function AppInner() {
     <div className="app-shell" style={sidebarExpanded ? { gridTemplateColumns: '220px 1fr' } : undefined}>
       {/* Sidebar */}
       <nav className={`sidebar ${sidebarExpanded ? 'expanded' : ''}`}>
-        <div className="sidebar-logo" title="FacturaProEC Admin" onClick={() => goto('dashboard')}>F</div>
+        <div className="sidebar-logo" title="FacPro Server Manager" onClick={() => goto('servidor')}>F</div>
         {TABS.map(t => (
           <button
             key={t.id}
@@ -117,11 +118,13 @@ function AppInner() {
         </header>
 
         <main className="content">
+          <ErrorBoundary key={activeTab} nombre={activeDef.label}>
           {activeTab === 'dashboard' && <DashboardView call={call} goto={goto} />}
           {activeTab === 'security' && <SecurityView call={call} toast={toast} />}
           {activeTab === 'storage' && <StorageView call={call} toast={toast} />}
           {activeTab === 'servidor' && <ServidorView call={call} toast={toast} />}
           {activeTab === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
+          </ErrorBoundary>
         </main>
       </div>
 
@@ -133,8 +136,12 @@ function AppInner() {
 export function App() {
   return (
     <ToastProvider>
-      <AppInner />
-      <UpdateModal />
+      <ErrorBoundary nombre="app">
+        <AppInner />
+      </ErrorBoundary>
+      <ErrorBoundary silencioso>
+        <UpdateModal />
+      </ErrorBoundary>
     </ToastProvider>
   );
 }

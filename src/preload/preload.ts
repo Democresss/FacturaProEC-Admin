@@ -25,10 +25,12 @@ const api = {
   app: {
     minimizeToTray: () => ipcRenderer.invoke('app:minimize-to-tray'),
     quit: () => ipcRenderer.invoke('app:quit'),
+    version: () => ipcRenderer.invoke('app:version') as Promise<string>,
   },
   notify: (title: string, body: string) => ipcRenderer.invoke('notify', title, body),
   autostart: {
     set: (enable: boolean) => ipcRenderer.invoke('autostart:set', enable) as Promise<{ ok: boolean; message: string }>,
+    get: () => ipcRenderer.invoke('autostart:get') as Promise<boolean>,
   },
   openExternal: (url: string) => ipcRenderer.invoke('shell:open', url),
   update: {

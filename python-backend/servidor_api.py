@@ -48,6 +48,19 @@ class Nombre(BaseModel):
     nombre: str
 
 
+class Accion(BaseModel):
+    accion: str
+    objetivo: Optional[str] = None
+
+
+ACCIONES = ("todo", "automatico", "docker-al-arrancar", "vigilante", "quitar-vigilante", "detener-suelto")
+
+
+def _pedir_admin():
+    """En Linux, lo que necesita administrador se repite con la ventana de clave del sistema (pkexec)."""
+    return None if fs.ES_WINDOWS else fs._abrir_como_admin
+
+
 def _sin_claves(resultado: Any) -> Any:
     """La dirección con la clave solo sale en el resultado de «configurar» (para copiarla); nunca en el análisis."""
     if isinstance(resultado, dict) and isinstance(resultado.get("conexion"), dict):
@@ -109,16 +122,32 @@ def enlace(c: Codigo) -> Dict[str, Any]:
 
 @router.post("/vigilante")
 def vigilante() -> Dict[str, Any]:
-    def instalar():
-        try:
-            r = fs.instalar_vigilante()
-        except RuntimeError:
-            if fs.ES_WINDOWS or fs.os.geteuid() == 0:
-                raise
-            fs._abrir_como_admin("--instalar-vigilante")
-            r = {"ok": True}
-        return r
-    return _tarea("vigilante", instalar)
+    return _tarea("vigilante", fs.automatizar, "vigilante", None, _pedir_admin())
+
+
+@router.get("/servicios")
+def servicios() -> Dict[str, Any]:
+    """Qué se levanta solo (Docker, túneles, base, vigilante) y qué no."""
+    try:
+        return {"ok": True, "data": fs.servicios()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": "No se pudieron revisar los servicios: %s" % e}
+
+
+@router.post("/servicios/accion")
+def servicio_accion(a: Accion) -> Dict[str, Any]:
+    if a.accion not in ACCIONES:
+        return {"ok": False, "message": "Acción desconocida"}
+    return _tarea("servicios", fs.automatizar, a.accion, a.objetivo, _pedir_admin())
+
+
+def arrancar_vigilante_de_la_app() -> None:
+    """Mientras la app está abierta (también en la bandeja) vigila el túnel. Si el servicio del sistema ya lo
+    vigila, la app espera y toma el relevo solo si ese servicio se detiene: nunca hay dos a la vez."""
+    try:
+        fs.encender_vigilante_aqui()
+    except Exception:  # noqa: BLE001 - la app funciona igual sin vigilante
+        pass
 
 
 @router.post("/avisar")
@@ -128,8 +157,10 @@ def avisar() -> Dict[str, Any]:
 
 def modo_linea_de_comandos(argv) -> Optional[int]:
     """El mismo ejecutable del backend sirve para el vigilante y para las tareas de administrador:
-    bridge --vigilar | --instalar-vigilante | --instalar-docker | --enlace CODIGO | --version."""
-    banderas = ("--vigilar", "--instalar-vigilante", "--instalar-docker", "--enlace", "--version", "--cli")
+    bridge [--datos CARPETA] --vigilar | --instalar-vigilante | --quitar-vigilante | --docker-al-arrancar | --servicios
+    | --instalar-docker | --enlace CODIGO | --version."""
+    banderas = ("--vigilar", "--instalar-vigilante", "--quitar-vigilante", "--docker-al-arrancar", "--servicios",
+                "--instalar-docker", "--enlace", "--version", "--cli")
     if any(b in argv for b in banderas):
         return fs.main(list(argv))
     return None

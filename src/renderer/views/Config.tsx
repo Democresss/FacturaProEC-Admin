@@ -13,17 +13,24 @@ export function ConfigView({ call, toast, theme }: ConfigViewProps) {
   const [autostart, setAutostart] = useState(true);
   const [rememberForms, setRememberForms] = useState(true);
   const [themeState, setThemeState] = useState<ThemeMode>(theme.mode);
+  const [version, setVersion] = useState('');
 
   // Carga la config persistida
   const loadConfig = useCallback(async () => {
     const r = await call('/api/config');
     if (r.ok && r.data) {
-      setAutostart(Boolean(r.data.autostart));
+      if (!(window as any).electronAPI?.autostart?.get) setAutostart(Boolean(r.data.autostart));
       setRememberForms(Boolean(r.data.remember_forms));
     }
   }, [call]);
 
-  useEffect(() => { loadConfig(); }, []);
+  useEffect(() => {
+    loadConfig();
+    const ea = (window as any).electronAPI;
+    ea?.app?.version?.().then((v: string) => setVersion(v)).catch(() => {});
+    // El interruptor muestra lo que de verdad está registrado en el sistema, no lo último guardado.
+    ea?.autostart?.get?.().then((on: boolean) => setAutostart(!!on)).catch(() => {});
+  }, []);
 
   // Sincroniza el tema con el hook al cambiarlo
   const setTheme = (m: ThemeMode) => {
@@ -83,7 +90,7 @@ export function ConfigView({ call, toast, theme }: ConfigViewProps) {
         </div>
       </Card>
 
-      <Card title="Acerca de" sub="FacturaProEC Admin v2.0.0 — Electron + Python backend" icon={<span>ℹ</span>}>
+      <Card title="Acerca de" sub={`FacPro Server Manager${version ? ' v' + version : ''} — Electron + Python backend`} icon={<span>ℹ</span>}>
         <div className="fs-12 col gap-8">
           <div><span className="muted">Plataforma:</span> <span className="mono">{navigator.platform}</span></div>
           <div><span className="muted">User Agent:</span> <span className="mono fs-11">{navigator.userAgent.slice(0, 80)}…</span></div>
