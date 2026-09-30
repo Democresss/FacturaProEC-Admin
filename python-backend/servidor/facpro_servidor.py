@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1864,6 +1864,35 @@ def _instalar_paquete(ruta, usuario):
     return {"ok": True, "reiniciar": reiniciar}
 
 
+def instalar_actualizacion_con_clave(ruta):
+    """Sin ayudante: instala la actualización .deb/.rpm descargada pidiendo la clave del sistema (la ventana; si no
+    responde, como por Escritorio remoto, una terminal). Antes la instalaba electron-updater con pkexec: si fallaba,
+    no se mostraba nada y el botón «Reiniciar y actualizar» parecía no hacer nada."""
+    real = os.path.realpath(ruta or "")
+    if not os.path.isfile(real) or not real.endswith((".deb", ".rpm")):
+        raise RuntimeError("No se encontró el paquete descargado de la actualización.")
+    if real.endswith(".deb"):
+        comando = (["apt-get", "install", "-y", "--allow-downgrades", real] if shutil.which("apt-get")
+                   else ["dpkg", "-i", real])
+    else:
+        herramienta = next((h for h in ("dnf", "zypper", "yum") if shutil.which(h)), None)
+        comando = ([herramienta, "install", "-y", real] if herramienta in ("dnf", "yum")
+                   else ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", real] if herramienta
+                   else ["rpm", "-U", "--replacepkgs", real])
+    log("Instalando la actualización (pide la clave del sistema)…", "paso")
+    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
+        code, out = run(["pkexec"] + comando, timeout=1800)
+        if code == 0:
+            log("Actualización instalada.", "ok")
+            return {"ok": True}
+        if code == 126:
+            raise RuntimeError("Se canceló la ventana de la clave del sistema.")
+        log("La ventana de clave del sistema no respondió: se abre una terminal para escribir la clave ahí.", "aviso")
+    _admin_por_terminal(comando)
+    log("Actualización instalada.", "ok")
+    return {"ok": True}
+
+
 def _comando_ayudante():
     if os.path.exists(AYUDANTE_BIN):
         return [AYUDANTE_BIN]
@@ -2391,7 +2420,7 @@ def _abrir_como_admin(argumento):
         if not r.get("ok"):
             raise RuntimeError("El ayudante no pudo completarlo: %s" % (r.get("error") or (r.get("salida") or "")[-300:]))
         return
-    if shutil.which("pkexec"):
+    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
         code, out = run(["pkexec"] + comando, timeout=3600)
         if code == 0:
             return
@@ -2414,7 +2443,7 @@ def _admin_por_terminal(comando):
     except OSError:
         pass
     with open(guion, "w", encoding="utf-8") as f:
-        f.write("#!/bin/bash\necho 'FacPro Server Manager necesita tu clave de administrador (solo esta vez).'\necho\n"
+        f.write("#!/bin/bash\necho 'FacPro Server Manager necesita tu clave de administrador.'\necho\n"
                 "%s\necho $? > %s\necho\nread -p 'Listo. Presiona Enter para cerrar esta ventana.' _\n" % (linea, shlex.quote(marca)))
     os.chmod(guion, 0o700)
     terminales = [("gnome-terminal", ["--", "bash", guion]), ("mate-terminal", ["-e", "bash " + shlex.quote(guion)]),

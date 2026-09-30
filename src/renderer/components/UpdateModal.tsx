@@ -39,6 +39,7 @@ export function UpdateModal() {
   const [dismissed, setDismissed] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notas, setNotas] = useState<string[]>([]);
+  const [instalando, setInstalando] = useState(false);
 
   const reset = useCallback(() => {
     setState('idle');
@@ -50,7 +51,15 @@ export function UpdateModal() {
 
   const handleInstall = useCallback(async () => {
     const ea = (window as any).electronAPI;
-    try { await ea?.update?.install(); } catch { /* el main lo instala */ }
+    setInstalando(true);
+    let r: any = null;
+    try { r = await ea?.update?.install(); } catch (e: any) { r = { ok: false, message: String(e?.message || e) }; }
+    // Si se instaló, la app se cierra y se vuelve a abrir sola; si no, se dice por qué (antes no pasaba nada)
+    if (r && r.ok === false) {
+      setInstalando(false);
+      setErrorMsg(r.message || 'No se pudo instalar');
+      setState('error');
+    }
   }, []);
 
   const handleDismiss = useCallback(() => {
@@ -111,7 +120,9 @@ export function UpdateModal() {
     footer = (
       <>
         <button className="btn" onClick={handleDismiss}>Más tarde</button>
-        <button className="btn btn-primary" onClick={handleInstall}>↻ Reiniciar y actualizar</button>
+        <button className="btn btn-primary" onClick={handleInstall} disabled={instalando}>
+          {instalando ? 'Instalando…' : '↻ Reiniciar y actualizar'}
+        </button>
       </>
     );
   } else if (state === 'error') {
@@ -159,7 +170,9 @@ export function UpdateModal() {
             Al reiniciar, se aplicará automáticamente.
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            Con «Más tarde» se instala sola cuando la app quede en la bandeja. El túnel sigue en línea mientras tanto (corre en Docker).
+            {instalando
+              ? 'Instalando… Si te pide la clave del sistema, escríbela (por Escritorio remoto se abre una terminal para eso). La app se vuelve a abrir sola.'
+              : 'Con «Más tarde» se instala sola cuando la app quede en la bandeja. El túnel sigue en línea mientras tanto (corre en Docker).'}
           </div>
           {novedades}
         </div>

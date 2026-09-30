@@ -480,8 +480,7 @@ function setupIpc() {
   });
   ipcMain.handle('update:install', async () => {
     try {
-      await instalarAhora();
-      return { ok: true };
+      return await instalarAhora();
     } catch (e: any) {
       return { ok: false, message: String(e?.message || e) };
     }
@@ -504,6 +503,48 @@ function setupIpc() {
  * En Linux .deb/.rpm instalar pide la clave del sistema: ahí se instala al salir (o con el botón).
  * En dev (sin empaquetar) no hace nada.
  */
+
+/** Registro de actualizaciones (userData/actualizaciones.log): qué se buscó, bajó, instaló o falló. */
+const REG_ACT = () => path.join(app.getPath('userData'), 'actualizaciones.log');
+function regAct(msg: string) {
+  console.log('[update]', msg);
+  try {
+    const f = REG_ACT();
+    if (fs.existsSync(f) && fs.statSync(f).size > 512 * 1024) fs.renameSync(f, f + '.1');
+    fs.appendFileSync(f, `${new Date().toISOString()} ${msg}\n`);
+  } catch { /* noop */ }
+}
+
+/** Linux .deb/.rpm (no AppImage): electron-updater instala con pkexec y, si falla (Escritorio remoto), no avisa. */
+const LINUX_PAQUETE = process.platform === 'linux' && !process.env.APPIMAGE;
+
+async function bridge(ruta: string, cuerpo?: any): Promise<any> {
+  const r = await fetch(`http://127.0.0.1:${bridgePort}${ruta}`, {
+    method: cuerpo ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': BRIDGE_TOKEN },
+    body: cuerpo ? JSON.stringify(cuerpo) : undefined,
+  });
+  return r.json();
+}
+
+/** Sin ayudante: el backend instala el paquete pidiendo la clave (ventana del sistema o, si no responde, una
+ *  terminal). Se espera hasta 15 minutos a que termine. */
+async function instalarConClave(): Promise<{ ok: boolean; message?: string }> {
+  if (!LINUX_PAQUETE || !archivoDescargado || !bridgePort) return { ok: false, message: 'No hay paquete descargado' };
+  try {
+    const inicio = await bridge('/api/servidor/instalar-actualizacion', { ruta: archivoDescargado, con_clave: true });
+    if (!inicio?.en_curso) return { ok: false, message: inicio?.message || 'No se pudo empezar la instalación' };
+    const desde = Date.now();
+    while (Date.now() - desde < 15 * 60 * 1000) {
+      await new Promise(r => setTimeout(r, 1500));
+      const p = await bridge('/api/servidor/progreso?desde=999999');
+      if (!p?.corriendo) return p?.error ? { ok: false, message: p.error } : { ok: true };
+    }
+    return { ok: false, message: 'Se esperó 15 minutos y no terminó' };
+  } catch (e: any) {
+    return { ok: false, message: String(e?.message || e) };
+  }
+}
 
 function instalacionSilenciosa(): boolean {
   return process.platform === 'win32' || (process.platform === 'linux' && !!process.env.APPIMAGE);
@@ -557,19 +598,32 @@ function buscarActualizacion(desdeElMenu = false) {
 
 /** Instala YA la versión descargada, con la app abierta o en la bandeja: sin preguntar en Windows y AppImage;
  *  en .deb/.rpm con el ayudante (sin clave) o, si no está, con la ventana de clave del sistema. Luego se reabre. */
-async function instalarAhora() {
-  if (!actualizacionLista) return;
+async function instalarAhora(): Promise<{ ok: boolean; message?: string }> {
+  if (!actualizacionLista) return { ok: false, message: 'Todavía no hay una versión descargada' };
   const oculta = !(mainWindow && mainWindow.isVisible());
-  if (await instalarConAyudante()) { reabrirActualizada(oculta); return; }
+  regAct(`instalar ${versionLista} (${oculta ? 'en la bandeja' : 'con la ventana abierta'})`);
+  if (await instalarConAyudante()) { regAct('instalada con el ayudante'); reabrirActualizada(oculta); return { ok: true }; }
+  if (LINUX_PAQUETE) {
+    const r = await instalarConClave();
+    regAct(r.ok ? 'instalada con la clave del sistema' : `NO se instaló: ${r.message}`);
+    if (r.ok) reabrirActualizada(oculta);
+    return r;
+  }
   if (oculta) { try { fs.writeFileSync(MARCA_OCULTA(), '1'); } catch { /* noop */ } }
   isQuitting = true;
   stopBridge();
   autoUpdater.quitAndInstall(true, true);
+  return { ok: true };
 }
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // En Linux .deb/.rpm la instala la app (ayudante o clave): la de electron-updater al salir falla sin avisar.
+  autoUpdater.autoInstallOnAppQuit = !LINUX_PAQUETE;
+  autoUpdater.logger = {
+    info: (m: any) => regAct(String(m)), warn: (m: any) => regAct('AVISO ' + String(m)),
+    error: (m: any) => regAct('ERROR ' + String(m)), debug: () => {},
+  } as any;
 
   autoUpdater.on('checking-for-update', () => {
     console.log('[update] Buscando actualizaciones…');
@@ -605,7 +659,7 @@ function setupAutoUpdater() {
     setTimeout(instalarSiEstaOculta, 5000);
   });
   autoUpdater.on('error', (err: Error) => {
-    console.warn('[update] error:', err?.message || err);
+    regAct('ERROR ' + String(err?.message || err));
     // Sin internet al revisar: nada que mostrar (se reintenta en 4 horas). Solo si falló una descarga en curso.
     if (descargando) {
       descargando = false;

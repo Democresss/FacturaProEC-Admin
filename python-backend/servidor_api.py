@@ -50,6 +50,7 @@ class Motor(BaseModel):
 
 class Paquete(BaseModel):
     ruta: str
+    con_clave: bool = False   # sin ayudante: pedir la clave (ventana del sistema o terminal) en una tarea
 
 
 class Nombre(BaseModel):
@@ -118,6 +119,9 @@ def ayudante() -> Dict[str, Any]:
 def instalar_actualizacion(p: Paquete) -> Dict[str, Any]:
     """Linux: la actualización descargada (.deb/.rpm) la instala el ayudante, sin pedir la clave."""
     if not fs.ayudante_disponible():
+        if p.con_clave:
+            r = _tarea("actualizar", fs.instalar_actualizacion_con_clave, p.ruta)
+            return dict(r, en_curso=bool(r.get("ok")))
         return {"ok": False, "sin_ayudante": True, "message": "Sin Modo administrador: se pedirá la clave del sistema."}
     r = fs.ayudante({"orden": "instalar-paquete", "ruta": p.ruta})
     return {"ok": bool(r.get("ok")), "message": r.get("error") or "Actualización instalada"}
