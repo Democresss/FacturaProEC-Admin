@@ -13,6 +13,7 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,17 +46,21 @@ def main():
     proc = subprocess.Popen(comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=entorno, text=True,
                             encoding="utf-8", errors="replace")
     puerto, salida = None, []
+
+    def leer_todo():
+        for linea in proc.stdout:
+            salida.append(linea)
+    threading.Thread(target=leer_todo, daemon=True).start()
     try:
         fin = time.time() + 90
         while time.time() < fin and puerto is None:
-            linea = proc.stdout.readline()
-            if not linea:
-                if proc.poll() is not None:
-                    break
-                continue
-            salida.append(linea)
-            if linea.startswith("BRIDGE_PORT="):
-                puerto = int(linea.strip().split("=")[1])
+            for linea in list(salida):
+                if linea.startswith("BRIDGE_PORT="):
+                    puerto = int(linea.strip().split("=")[1])
+            if puerto is None and proc.poll() is not None:
+                time.sleep(0.5)
+                break
+            time.sleep(0.2)
         c(puerto is not None, "el backend arranca y da su puerto", "".join(salida[-8:]) if puerto is None else puerto)
         if puerto is None:
             return 1
@@ -80,6 +85,9 @@ def main():
     version = subprocess.run(comando + ["--version"], capture_output=True, text=True, timeout=60)
     c(version.returncode == 0 and version.stdout.strip()[:1].isdigit(), "el mismo ejecutable sirve de vigilante (--version)",
       version.stdout.strip() or version.stderr[-200:])
+    if not all(ok):
+        print("\n--- salida del backend (últimas 80 líneas) ---")
+        print("".join(salida[-80:]))
     print("\nRESULTADO: %s (%d/%d)" % ("TODO OK" if all(ok) else "HAY FALLOS", sum(ok), len(ok)))
     return 0 if all(ok) else 1
 
