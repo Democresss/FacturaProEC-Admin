@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.0"
+VERSION = "1.16.1"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -52,7 +52,8 @@ RED = "facpro-red"
 C_PG, C_MINIO = "facpro-postgres", "facpro-minio"
 C_BORE_PG, C_BORE_MINIO = "facpro-bore-postgres", "facpro-bore-minio"
 IMG_PG, IMG_MINIO, IMG_BORE, IMG_ALPINE = "postgres:17", "minio/minio", "ekzhang/bore", "alpine:3"
-IMG_SOCAT, IMG_MC = "alpine/socat", "minio/mc"
+IMG_SOCAT, IMG_MC = "alpine/socat", "quay.io/minio/mc"
+IMGS_MC = (IMG_MC, "minio/mc")          # minio/mc dejó de estar en Docker Hub: primero quay.io
 C_MINIO_TLS, V_MINIO_TLS = "facpro-minio-tls", "facpro-minio-tls"
 BUCKET_FACTURAPRO = "facturapro-media"
 BASE_NUEVA = "__nueva__"
@@ -1144,16 +1145,38 @@ def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTUR
     clave = clave_segura(40)
     politica = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:*"], "Resource": [
         "arn:aws:s3:::%s" % bucket, "arn:aws:s3:::%s/*" % bucket]}]})
-    archivo = os.path.join(carpeta_datos(), ".mc-%d.env" % os.getpid())
     os.makedirs(carpeta_datos(), exist_ok=True)
-    with open(archivo, "w", encoding="utf-8") as f:
-        f.write("MC_HOST_l=http://%s:%s@%s:9000\n" % (quote(root_usuario, safe=""), quote(root_clave, safe=""), destino))
-    if not ES_WINDOWS:
-        os.chmod(archivo, 0o600)
+    archivos = []
+
+    def archivo_mc(servidor):
+        archivo = os.path.join(carpeta_datos(), ".mc-%d-%d.env" % (os.getpid(), len(archivos)))
+        with open(archivo, "w", encoding="utf-8") as f:
+            f.write("MC_HOST_l=http://%s:%s@%s:9000\n" % (quote(root_usuario, safe=""), quote(root_clave, safe=""), servidor))
+        if not ES_WINDOWS:
+            os.chmod(archivo, 0o600)
+        archivos.append(archivo)
+        return archivo
+
     try:
+        # 1) el mc que ya trae la imagen de MinIO (no descarga nada); 2) la imagen oficial de mc (quay.io; Docker Hub ya no)
+        formas = []
+        if destino != "host.docker.internal":
+            formas.append(["exec", "-i", "--env-file", archivo_mc("127.0.0.1"), destino, "mc"])
+        otro = archivo_mc(destino)
+        formas += [["run", "--rm", "-i", "--network", RED, "--env-file", otro, img] for img in IMGS_MC]
+        fallos, prefijo = [], None
+        for forma in formas:
+            code, out = dk(*(forma + ["--version"]), timeout=600)
+            if code == 0:
+                prefijo = forma
+                break
+            fallos.append((out or "").strip()[-160:])
+        if not prefijo:
+            raise RuntimeError("MinIO: no encontré el programa «mc» (ni dentro de tu contenedor de MinIO ni en %s): %s"
+                               % (" / ".join(IMGS_MC), " | ".join(fallos)))
+
         def mc(*args, entrada=None):
-            return dk(*(["run", "--rm", "-i", "--network", RED, "--env-file", archivo, IMG_MC] + list(args)),
-                      timeout=600, entrada=entrada)
+            return dk(*(prefijo + list(args)), timeout=600, entrada=entrada)
         pasos = [(("mb", "--ignore-existing", "l/" + bucket), None),
                  (("admin", "user", "add", "l", USUARIO_FACTURAPRO, clave), None),
                  (("admin", "policy", "create", "l", "facturapro-archivos", "/dev/stdin"), politica),
@@ -1163,10 +1186,11 @@ def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTUR
             if code != 0 and not re.search(r"already|ya existe", out or "", re.I):
                 raise RuntimeError("MinIO: no se pudo «%s»: %s" % (" ".join(args[:3]), (out or "")[-300:]))
     finally:
-        try:
-            os.remove(archivo)
-        except OSError:
-            pass
+        for archivo in archivos:
+            try:
+                os.remove(archivo)
+            except OSError:
+                pass
     log("MinIO: usuario «%s» solo para el bucket «%s» (sin la clave maestra)." % (USUARIO_FACTURAPRO, bucket), "ok")
     return clave
 
