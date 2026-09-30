@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -397,8 +397,41 @@ def docker_bin():
     return None
 
 
+_HILO = threading.local()
+
+
+class en_motor:
+    """Dentro de este bloque, «docker …» va al Docker indicado (solo en este hilo). host vacío = el de siempre."""
+
+    def __init__(self, host):
+        self.host = host or None
+
+    def __enter__(self):
+        self.antes = getattr(_HILO, "host", None)
+        _HILO.host = self.host or self.antes
+        return self
+
+    def __exit__(self, *a):
+        _HILO.host = self.antes
+
+
+def clave_de(c):
+    """Identifica un contenedor en todo el equipo: «unix:///…docker.sock::nombre» (o solo el nombre si hay un Docker)."""
+    return ("%s::%s" % (c["host"], c["nombre"])) if c.get("host") else c["nombre"]
+
+
+def _separar(clave):
+    """«host::nombre» → (host, nombre); «nombre» → ("", nombre)."""
+    clave = clave or ""
+    if "::" in clave:
+        host, nombre = clave.rsplit("::", 1)
+        return host, nombre
+    return "", clave
+
+
 def dk(*args, timeout=180, host=None):
-    """docker …; con host, en ese Docker (otro motor del mismo equipo)."""
+    """docker …; con host (o dentro de «with en_motor(host)»), en ese Docker del mismo equipo."""
+    host = host or getattr(_HILO, "host", None)
     if host:
         return run([DOCKER] + list(args), timeout=timeout, env=dict(os.environ, DOCKER_HOST=host))
     return run([DOCKER] + list(args), timeout=timeout)
@@ -427,10 +460,14 @@ def contenedores():
 
 
 def _ordenar(candidatos, *preferidos):
-    """Primero el elegido, luego los encendidos y el más reciente (docker ps ya lista del más nuevo al más viejo)."""
-    orden = {c["nombre"]: i for i, c in enumerate(candidatos)}
-    return sorted(candidatos, key=lambda c: tuple(c["nombre"] != p for p in preferidos if p)
-                  + (c["estado"] != "running", orden[c["nombre"]]))
+    """Primero el elegido, luego los encendidos y el más reciente (docker ps ya lista del más nuevo al más viejo).
+    preferidos: nombres o claves «host::nombre»."""
+    def coincide(c, p):
+        host, nombre = _separar(p)
+        return c["nombre"] == nombre and (not host or c.get("host", "") == host)
+    orden = {id(c): i for i, c in enumerate(candidatos)}
+    return sorted(candidatos, key=lambda c: tuple(not coincide(c, p) for p in preferidos if p)
+                  + (c["estado"] != "running", orden[id(c)]))
 
 
 def _es_postgres(c):
@@ -470,7 +507,26 @@ def todos_los_contenedores(lista):
 
 def _resumen(c):
     return {"nombre": c["nombre"], "imagen": c["imagen"], "corriendo": c["estado"] == "running", "creado": c.get("creado", ""),
-            "puertos": _puertos_cortos(c.get("puertos"))}
+            "puertos": _puertos_cortos(c.get("puertos")), "motor": c.get("motor", ""), "host": c.get("host", ""),
+            "clave": clave_de(c)}
+
+
+def contenedores_todos(motores=None):
+    """Los contenedores de TODOS los Docker del equipo a los que hay acceso, cada uno con su Docker (motor, host).
+    Con un solo Docker, motor y host quedan vacíos (se usa el de siempre)."""
+    if ES_WINDOWS:
+        return contenedores()
+    motores = [m for m in (motores if motores is not None else motores_docker()) if m.get("contenedores", -1) >= 0]
+    if len(motores) <= 1:
+        if motores:
+            with en_motor(motores[0]["host"]):
+                return contenedores()
+        return contenedores()
+    salida = []
+    for m in motores:
+        with en_motor(m["host"]):
+            salida += [dict(c, motor=m["nombre"], host=m["host"]) for c in contenedores()]
+    return salida
 
 
 def inspeccionar(nombre, host=None):
@@ -619,16 +675,30 @@ def _credenciales_contenedor(env):
 def analizar_postgres(lista, config, elegido=None):
     candidatos = [c for c in lista if _es_postgres(c)]
     preferido = config.get("pg_contenedor")
+    if preferido and config.get("docker_host"):
+        preferido = "%s::%s" % (config["docker_host"], preferido)
     candidatos = _ordenar(candidatos, elegido, preferido)
     if candidatos:
         c = candidatos[0]
+        with en_motor(c.get("host")):
+            return _analizar_pg_contenedor(c, candidatos, config)
+    if puerto_abierto("127.0.0.1", 5432):
+        return {"estado": "nativo", "puerto_host": 5432, "ssl": sonda_ssl("127.0.0.1", 5432, 3), "bases": [],
+                "nota": "PostgreSQL instalado en el equipo (fuera de Docker). Escribe su usuario, clave y base."}
+    return {"estado": "no", "bases": []}
+
+
+def _analizar_pg_contenedor(c, candidatos, config):
+    preferido = config.get("pg_contenedor")
+    if True:
         info = inspeccionar(c["nombre"])
         env = env_de(info)
         usuario, clave, db_env = _credenciales_contenedor(env)
         pg = {"estado": "contenedor", "contenedor": c["nombre"], "imagen": c["imagen"], "corriendo": c["estado"] == "running",
               "usuario": usuario, "tiene_clave": bool(clave), "puerto_host": puerto_publicado(c["puertos"], 5432),
               "otros": [x["nombre"] for x in candidatos[1:]], "bases": [], "ssl": None, "ya_configurado": c["nombre"] == preferido,
-              "contenedores": [_resumen(x) for x in candidatos]}
+              "contenedores": [_resumen(x) for x in candidatos], "clave": clave_de(c), "motor": c.get("motor", ""),
+              "host": c.get("host", ""), "creado": c.get("creado", "")}
         if pg["corriendo"]:
             ok, out = _psql(c["nombre"], "select datname, pg_get_userbyid(datdba) from pg_database "
                                          "where not datistemplate and datname <> 'postgres' order by 1", usuario=usuario, clave=clave)
@@ -645,22 +715,24 @@ def analizar_postgres(lista, config, elegido=None):
             else:
                 pg["error"] = "No se pudo entrar a PostgreSQL con el usuario «%s»." % usuario
         return pg
-    if puerto_abierto("127.0.0.1", 5432):
-        return {"estado": "nativo", "puerto_host": 5432, "ssl": sonda_ssl("127.0.0.1", 5432, 3), "bases": [],
-                "nota": "PostgreSQL instalado en el equipo (fuera de Docker). Escribe su usuario, clave y base."}
-    return {"estado": "no", "bases": []}
 
 
 def analizar_minio(lista, elegido=None, config=None):
     candidatos = [x for x in lista if _es_minio(x)]
-    candidatos = _ordenar(candidatos, elegido, (config or {}).get("minio_contenedor"))
+    preferido = (config or {}).get("minio_contenedor")
+    if preferido and (config or {}).get("minio_docker_host"):
+        preferido = "%s::%s" % (config["minio_docker_host"], preferido)
+    candidatos = _ordenar(candidatos, elegido, preferido)
     c = candidatos[0] if candidatos else None
     if c:
-        env = env_de(inspeccionar(c["nombre"]))
+        with en_motor(c.get("host")):
+            env = env_de(inspeccionar(c["nombre"]))
         return {"estado": "contenedor", "contenedor": c["nombre"], "corriendo": c["estado"] == "running",
                 "puerto_host": puerto_publicado(c["puertos"], 9000),
                 "tiene_clave": bool(env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY")),
-                "contenedores": [_resumen(x) for x in candidatos]}
+                "usuario": env.get("MINIO_ROOT_USER") or env.get("MINIO_ACCESS_KEY") or "",
+                "contenedores": [_resumen(x) for x in candidatos], "clave": clave_de(c), "motor": c.get("motor", ""),
+                "host": c.get("host", ""), "creado": c.get("creado", "")}
     if puerto_abierto("127.0.0.1", 9000):
         return {"estado": "nativo", "puerto_host": 9000}
     return {"estado": "no"}
@@ -748,12 +820,14 @@ def analizar_bore(lista):
     tuneles = []
     for c in lista:
         if "bore" in c["imagen"]:
-            puerto, _ = _puerto_bore_de_logs(c["nombre"]) if c["estado"] == "running" else (None, "")
-            args = " ".join(((inspeccionar(c["nombre"]).get("Config") or {}).get("Cmd") or []))
+            with en_motor(c.get("host")):
+                puerto, _ = _puerto_bore_de_logs(c["nombre"]) if c["estado"] == "running" else (None, "")
+                args = " ".join(((inspeccionar(c["nombre"]).get("Config") or {}).get("Cmd") or []))
             puerto = puerto or _puerto_de_args(args)
             destino = re.search(r"local (\d+)", args)
             t = {"contenedor": c["nombre"], "corriendo": c["estado"] == "running", "puerto": puerto,
-                 "destino": int(destino.group(1)) if destino else None, "args": args}
+                 "destino": int(destino.group(1)) if destino else None, "args": args,
+                 "motor": c.get("motor", ""), "host": c.get("host", "")}
             t.update(_estado_tunel(puerto, t["destino"]))
             tuneles.append(t)
     procesos = procesos_bore()
@@ -761,10 +835,12 @@ def analizar_bore(lista):
         destino = re.search(r"local (\d+)", p.get("comando") or "")
         p["destino"] = int(destino.group(1)) if destino else None
         p.update(_estado_tunel(p.get("puerto"), p["destino"]))
-    try:
-        otros = tuneles_en_otros_docker()
-    except Exception:  # noqa: BLE001 - no impedir el análisis
-        otros = []
+    otros = []
+    if not any(c.get("host") for c in lista):   # con varios Docker, «lista» ya los trae todos
+        try:
+            otros = tuneles_en_otros_docker()
+        except Exception:  # noqa: BLE001 - no impedir el análisis
+            otros = []
     return {"contenedores": tuneles, "procesos": procesos, "otros_docker": otros, "instalado": bool(shutil.which("bore"))}
 
 
@@ -775,12 +851,12 @@ def analizar(pg_elegido=None, minio_elegido=None):
         "sistema": {"so": "%s %s" % (platform.system(), platform.release()), "equipo": socket.gethostname(),
                     "python": platform.python_version(), "carpeta": carpeta_datos(),
                     "admin": (not ES_WINDOWS and hasattr(os, "geteuid") and os.geteuid() == 0)},
-        "docker": dict(docker_estado(), motores=motores_docker()),
+        "docker": dict(docker_estado(), motores=motores_docker()) if not ES_WINDOWS else docker_estado(),
         "internet": {"bore_pub": puerto_abierto(BORE_HOST, BORE_PUERTO_CONTROL, 5)},
         "config": sin_secretos(config),
     }
     if resultado["docker"]["corriendo"]:
-        lista = contenedores()
+        lista = contenedores_todos(resultado["docker"].get("motores"))
         resultado["postgres"] = analizar_postgres(lista, config, pg_elegido)
         resultado["minio"] = analizar_minio(lista, minio_elegido, config)
         resultado["bore"] = analizar_bore(lista)
@@ -1054,9 +1130,12 @@ def configurar(opciones):
         raise RuntimeError("Docker no está instalado. Pulsa «Instalar Docker».")
     if not iniciar_docker():
         raise RuntimeError("Docker está instalado pero no enciende. Ábrelo a mano y vuelve a intentar.")
-    asegurar_red()
-    lista = contenedores()
+    lista = contenedores_todos()
     pg_info = analizar_postgres(lista, config, opciones.get("pg_contenedor"))
+    if pg_info.get("host") and pg_info["host"] != (os.environ.get("DOCKER_HOST") or ""):
+        usar_motor(pg_info["host"])   # el túnel va en el Docker de PostgreSQL; el vigilante usa el mismo
+        config = leer_config()
+    asegurar_red()
     extra_bore = []
 
     # 1. PostgreSQL
@@ -1105,7 +1184,11 @@ def configurar(opciones):
     # 4. MinIO (opcional)
     minio = {}
     if opciones.get("minio"):
-        m_info = analizar_minio(contenedores(), opciones.get("minio_contenedor"), config)
+        m_info = analizar_minio(contenedores_todos(), opciones.get("minio_contenedor"), config)
+        m_host = m_info.get("host") or None
+        _HILO.host = m_host        # MinIO puede estar en otro Docker: su túnel va en ese Docker
+        if m_host:
+            asegurar_red()
         if m_info["estado"] == "no":
             m_usuario, m_clave = "facpro", clave_segura()
             log("Creando MinIO en Docker («%s»)…" % C_MINIO, "paso")
@@ -1131,7 +1214,9 @@ def configurar(opciones):
             m_cont = "host.docker.internal"
         puerto_minio = levantar_bore(C_BORE_MINIO, m_cont, 9000, config.get("bore_puerto_minio"),
                                      ["--add-host", "host.docker.internal:host-gateway"] if (m_cont == "host.docker.internal" and not ES_WINDOWS) else None)
-        minio.update({"endpoint": "http://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont})
+        minio.update({"endpoint": "http://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont,
+                      "docker_host": m_host or ""})
+        _HILO.host = None
 
     # 5. Prueba desde internet
     log("Probando la conexión desde internet (%s:%d)…" % (BORE_HOST, puerto_pg), "paso")
@@ -1153,7 +1238,8 @@ def configurar(opciones):
                  pg_base=base, bore_puerto_pg=puerto_pg, actualizado=time.strftime("%Y-%m-%d %H:%M"))
     if minio:
         nuevo.update(minio_endpoint=minio["endpoint"], minio_usuario=minio.get("usuario", ""),
-                     bore_puerto_minio=minio.get("puerto"), minio_contenedor=minio.get("contenedor", ""))
+                     bore_puerto_minio=minio.get("puerto"), minio_contenedor=minio.get("contenedor", ""),
+                     minio_docker_host=minio.get("docker_host", ""))
     ruta = guardar_config(nuevo)
     with open(os.path.join(carpeta_datos(), "conexion.txt"), "w", encoding="utf-8") as f:
         f.write("Dirección de tu base para FacturaPro → Conecta tu base de datos (%s).\n"
@@ -2054,8 +2140,17 @@ def activar_modo_admin():
     return {"ok": True}
 
 
-def hacer_automatico(nombre):
-    """El contenedor se vuelve a levantar solo tras un reinicio o una caída (docker update --restart)."""
+def hacer_automatico(clave):
+    """El contenedor se vuelve a levantar solo tras un reinicio o una caída (docker update --restart).
+    clave: nombre o «host::nombre» (contenedor de otro Docker del equipo)."""
+    host, nombre = _separar(clave)
+    if host and host not in [h for _, h in _motores_candidatos()]:
+        raise RuntimeError("Ese Docker no existe en este equipo.")
+    with en_motor(host):
+        return _hacer_automatico(nombre)
+
+
+def _hacer_automatico(nombre):
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", nombre or ""):
         raise RuntimeError("Nombre de contenedor inválido.")
     info = inspeccionar(nombre)
@@ -2102,28 +2197,33 @@ def servicios():
                              else "No está instalado (en «Servidor y túnel» → Instalar Docker)",
                   "accion": "docker-al-arrancar" if est["instalado"] and d["activo"] is False else None})
     if est["corriendo"]:
-        importantes = {config.get("pg_contenedor"), config.get("minio_contenedor")} - {None, ""}
-        for c in contenedores():
+        def es_de(c, nombre, host):
+            return bool(nombre) and c["nombre"] == nombre and (not host or not c.get("host") or c["host"] == host)
+
+        for c in contenedores_todos():
+            es_pg = es_de(c, config.get("pg_contenedor"), config.get("docker_host"))
             es_bore = "bore" in c["imagen"]
-            if not es_bore and c["nombre"] not in importantes:
+            if not es_bore and not es_pg and not es_de(c, config.get("minio_contenedor"), config.get("minio_docker_host")):
                 continue
-            info = inspeccionar(c["nombre"])
-            politica = _politica(info)
-            auto = politica in ("always", "unless-stopped")
-            corriendo = c["estado"] == "running"
-            if es_bore:
-                args = list((info.get("Config") or {}).get("Cmd") or [])
-                destino = int(args[args.index("local") + 1]) if "local" in args and args[args.index("local") + 1].isdigit() else None
-                puerto = (_puerto_bore_de_logs(c["nombre"])[0] if corriendo else None) or _puerto_de_args(args)
-                nombre = "Túnel %s:%s → %s" % (BORE_HOST, puerto or "?", _servicio(destino))
-                tipo = "tunel"
-            else:
-                nombre = ("Base PostgreSQL" if c["nombre"] == config.get("pg_contenedor") else "Archivos MinIO")
-                tipo = "contenedor"
-            lista.append({"id": "c:" + c["nombre"], "tipo": tipo, "nombre": nombre, "contenedor": c["nombre"],
+            with en_motor(c.get("host")):
+                info = inspeccionar(c["nombre"])
+                politica = _politica(info)
+                auto = politica in ("always", "unless-stopped")
+                corriendo = c["estado"] == "running"
+                if es_bore:
+                    args = list((info.get("Config") or {}).get("Cmd") or [])
+                    destino = int(args[args.index("local") + 1]) if "local" in args and args[args.index("local") + 1].isdigit() else None
+                    puerto = (_puerto_bore_de_logs(c["nombre"])[0] if corriendo else None) or _puerto_de_args(args)
+                    nombre = "Túnel %s:%s → %s" % (BORE_HOST, puerto or "?", _servicio(destino))
+                    tipo = "tunel"
+                else:
+                    nombre = "Base PostgreSQL" if es_pg else "Archivos MinIO"
+                    tipo = "contenedor"
+            donde = " (%s)" % c["motor"] if c.get("motor") else ""
+            lista.append({"id": "c:" + clave_de(c), "tipo": tipo, "nombre": nombre, "contenedor": clave_de(c),
                           "corriendo": corriendo, "automatico": auto,
-                          "detalle": "%s · %s · %s" % (c["nombre"], "corriendo" if corriendo else c["estado"],
-                                                       "se levanta solo" if auto else "NO se levanta solo tras un reinicio"),
+                          "detalle": "%s%s · %s · %s" % (c["nombre"], donde, "corriendo" if corriendo else c["estado"],
+                                                         "se levanta solo" if auto else "NO se levanta solo tras un reinicio"),
                           "accion": None if auto and corriendo else "automatico"})
     for p in procesos_bore():
         lista.append({"id": "p:%s" % p["pid"], "tipo": "suelto", "nombre": "bore fuera de Docker (puerto %s)" % (p.get("puerto") or "?"),

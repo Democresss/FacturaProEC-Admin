@@ -12,10 +12,13 @@ import { Modal } from '../components/Modal';
 type Call = (path: string, opts?: RequestInit) => Promise<any>;
 type Toast = (title: string, body?: string, kind?: any) => void;
 
-interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string; puertos?: string; rol?: string; estado?: string }
+interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string; puertos?: string; rol?: string; estado?: string;
+                      motor?: string; host?: string; clave?: string }
 interface MotorDocker { nombre: string; host: string; contenedores: number; elegido: boolean; sin_permiso?: boolean }
 // «2024-05-01 12:00:00 -0500 -05» → «creado 2024-05-01»
 const creado = (c: Contenedor) => c.creado ? ` · creado ${c.creado.slice(0, 10)}` : '';
+const donde = (c: { motor?: string }) => c.motor ? ` · ${c.motor.replace(/ \(el de «sudo docker»\)/, '')}` : '';
+const quien = (c: Contenedor) => `${c.nombre}${donde(c)} · ${c.corriendo ? 'encendido' : 'apagado'}${c.creado ? ' · creado ' + c.creado.slice(0, 10) : ''}`;
 const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
 interface Base { nombre: string; dueno: string; tablas: number | null }
 interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null;
@@ -131,7 +134,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     const o: any = { minio, detener_bore_viejo: true };
     if (puerto.trim()) o.puerto = parseInt(puerto, 10);
     if (pgElegido) o.pg_contenedor = pgElegido;
-    if (minio && (minioElegido || listaMinio[0])) o.minio_contenedor = minioElegido || listaMinio[0].nombre;
+    if (minio && (minioElegido || a?.minio?.clave || listaMinio[0])) o.minio_contenedor = minioElegido || a?.minio?.clave || listaMinio[0].nombre;
     if (pg.estado === 'contenedor' && bases.length) {
       o.base = base;
       if (claveBase) o.clave_base = claveBase;
@@ -225,11 +228,12 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
                   : dock.instalado ? 'Instalado pero apagado' : 'No está instalado'}
               </div>
               {motores.length > 1 && (
-                <select className="input" style={{ marginTop: 6 }} value={motores.find(m => m.elegido)?.host ?? ''}
-                        title="Este equipo tiene más de un Docker" onChange={e => cambiarMotor(e.target.value)}>
-                  {motores.map(m => <option key={m.host || 'sistema'} value={m.host} disabled={m.sin_permiso || m.contenedores < 0}>
-                    {m.nombre} — {m.contenedores >= 0 ? `${m.contenedores} contenedores` : m.sin_permiso ? 'sin permiso: activa el Modo administrador' : 'no responde'}</option>)}
-                </select>
+                <div className="fs-12" style={{ marginTop: 4 }}>
+                  {motores.map(m => (
+                    <div key={m.host}>• {m.nombre}: {m.contenedores >= 0 ? `${m.contenedores} contenedores` : m.sin_permiso ? 'sin permiso' : 'no responde'}</div>
+                  ))}
+                  <div className="muted fs-11">Reviso todos a la vez: abajo ves todo junto.</div>
+                </div>
               )}
               {motores.some(m => m.sin_permiso) && (
                 <div className="fs-11" style={{ color: 'var(--warning)', marginTop: 4 }}>
@@ -242,7 +246,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             <div className="stat-block">
               <div className="fw-700">🐘 PostgreSQL</div>
               <div className="fs-12 muted">
-                {pg.estado === 'contenedor' ? `En Docker: ${pg.contenedor} · SSL ${pg.ssl === true ? 'activo' : pg.ssl === false ? 'apagado (se activa)' : '—'}`
+                {pg.estado === 'contenedor' ? `En Docker: ${pg.contenedor}${donde(pg)} · SSL ${pg.ssl === true ? 'activo' : pg.ssl === false ? 'apagado (se activa)' : '—'}`
                   : pg.estado === 'nativo' ? 'Instalado en el equipo (puerto 5432)'
                   : pg.estado === 'no' ? 'No existe: se crea en Docker con clave segura' : 'Se revisa con Docker encendido'}
               </div>
@@ -299,19 +303,21 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
       {a && dock.corriendo && (
         <Card title={`Contenedores en este equipo (${todos.length})`} icon={<span>🐳</span>}
-              sub={`Todo lo que tiene ${motores.find(m => m.elegido)?.nombre || 'Docker'}, con sus puertos. Abajo eliges cuál PostgreSQL y cuál MinIO usa FacturaPro.`}
+              sub={motores.length > 1 ? 'De todos tus Docker, con sus puertos y de qué Docker es cada uno. Abajo eliges cuál PostgreSQL y cuál MinIO usa FacturaPro.'
+                                      : 'Todo lo que tiene Docker, con sus puertos. Abajo eliges cuál PostgreSQL y cuál MinIO usa FacturaPro.'}
               right={todos.length > 6 ? <button className="btn btn-sm" onClick={() => setVerTodos(v => !v)}>{verTodos ? 'Ver menos' : 'Ver todos'}</button> : undefined}>
           {todos.length === 0 && <div className="muted fs-12">No hay contenedores en este Docker.</div>}
           {(verTodos ? todos : todos.slice(0, 6)).map(c => {
-            const usado = c.nombre === pg.contenedor || c.nombre === a?.minio?.contenedor;
+            const usado = !!c.clave && (c.clave === pg.clave || c.clave === a?.minio?.clave);
             return (
-              <div key={c.nombre} className="row between items-center gap-8" style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+              <div key={c.clave || c.nombre} className="row between items-center gap-8" style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
                 <div style={{ minWidth: 0 }}>
                   <div className="fs-13"><span style={{ color: c.corriendo ? 'var(--success)' : 'var(--text-muted)' }}>●</span>{' '}
                     <b className="mono">{c.nombre}</b> <span className="muted fs-12">{c.imagen}</span></div>
                   <div className="fs-12 muted">{c.corriendo ? 'encendido' : (c.estado || 'apagado')}{c.puertos ? ` · puertos ${c.puertos}` : ' · sin puertos publicados'}{creado(c)}</div>
                 </div>
                 <div className="row gap-4" style={{ flexShrink: 0 }}>
+                  {c.motor && <span className="badge neutral">{c.motor.replace(/ \(el de «sudo docker»\)/, '')}</span>}
                   {usado && <span className="badge ok">en uso</span>}
                   <span className={`badge ${c.rol === 'otro' ? 'neutral' : ''}`}>{ROL[c.rol || 'otro']}</span>
                 </div>
@@ -339,10 +345,28 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           {listaPg.length > 0 && (
             <div className="form-row">
               <label className="form-label">PostgreSQL que usará FacturaPro ({listaPg.length} encontrado{listaPg.length === 1 ? '' : 's'})</label>
-              <select className="input" value={pgElegido || pg.contenedor}
+              {listaPg.length > 1 && (
+                <div className="fs-12" style={{ marginBottom: 6, padding: 8, borderRadius: 8, background: 'var(--primary-faint)' }}>
+                  Encontré {listaPg.length}. Uso <b>{quien(listaPg.find(c => c.clave === pg.clave) || listaPg[0])}</b>.
+                  {listaPg.filter(c => c.clave !== pg.clave).map(c => (
+                    <div key={c.clave} className="row between items-center" style={{ marginTop: 4 }}>
+                      <span>¿Usar <b>{quien(c)}</b>?</span>
+                      <button className="btn btn-sm" onClick={() => { setPgElegido(c.clave || c.nombre); setBase(''); analizar(c.clave || c.nombre, minioElegido || undefined); }}>Usar este</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <select className="input" value={pgElegido || pg.clave || pg.contenedor}
                       onChange={e => { setPgElegido(e.target.value); setBase(''); analizar(e.target.value, minioElegido || undefined); }}>
-                {listaPg.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
+                {listaPg.map(c => <option key={c.clave || c.nombre} value={c.clave || c.nombre}>{c.nombre}{donde(c)} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
+              {pg.estado === 'contenedor' && (
+                <div className="fs-12" style={{ marginTop: 4, color: pideClave ? 'var(--warning)' : 'var(--success)' }}>
+                  {pideClave
+                    ? `🔑 La base «${baseSel?.nombre}» es de «${baseSel?.dueno}»: escribe su clave abajo (solo se usa en este equipo).`
+                    : `🔑 Usuario «${pg.usuario}» y su clave: los leo del contenedor. No tienes que escribir nada.`}
+                </div>
+              )}
             </div>
           )}
           {pg.estado === 'contenedor' && bases.length > 0 && (
@@ -390,9 +414,28 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           {listaMinio.length > 0 && (
             <div className="form-row">
               <label className="form-label">MinIO ({listaMinio.length} encontrado{listaMinio.length === 1 ? '' : 's'}){minio ? ': ¿cuál publico?' : ''}</label>
-              <select className="input" value={minioElegido || listaMinio[0].nombre} onChange={e => setMinioElegido(e.target.value)}>
-                {listaMinio.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
+              {listaMinio.length > 1 && (
+                <div className="fs-12" style={{ marginBottom: 6, padding: 8, borderRadius: 8, background: 'var(--primary-faint)' }}>
+                  Encontré {listaMinio.length}. Uso <b>{quien(listaMinio.find(c => c.clave === a?.minio?.clave) || listaMinio[0])}</b>.
+                  {listaMinio.filter(c => c.clave !== a?.minio?.clave).map(c => (
+                    <div key={c.clave} className="row between items-center" style={{ marginTop: 4 }}>
+                      <span>¿Usar <b>{quien(c)}</b>?</span>
+                      <button className="btn btn-sm" onClick={() => { setMinioElegido(c.clave || c.nombre); analizar(pgElegido || undefined, c.clave || c.nombre); }}>Usar este</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <select className="input" value={minioElegido || a?.minio?.clave || listaMinio[0].nombre}
+                      onChange={e => { setMinioElegido(e.target.value); analizar(pgElegido || undefined, e.target.value); }}>
+                {listaMinio.map(c => <option key={c.clave || c.nombre} value={c.clave || c.nombre}>{c.nombre}{donde(c)} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{creado(c)}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
+              {a?.minio?.estado === 'contenedor' && (
+                <div className="fs-12" style={{ marginTop: 4, color: a.minio.tiene_clave ? 'var(--success)' : 'var(--warning)' }}>
+                  {a.minio.tiene_clave
+                    ? `🔑 Usuario «${a.minio.usuario}» y su clave: los leo del contenedor. No tienes que escribir nada.`
+                    : '🔑 Este MinIO no tiene su usuario y clave en la configuración del contenedor: usa la que pusiste al crearlo.'}
+                </div>
+              )}
             </div>
           )}
           <div className="btn-row">
