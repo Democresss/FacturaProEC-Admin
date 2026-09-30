@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -271,13 +271,8 @@ def _contar_contenedores(host=None):
     return len(r.stdout.split()) if r.returncode == 0 else -1
 
 
-def elegir_docker():
-    """En Linux puede haber más de un Docker: el del sistema (el que ve sudo), Docker Desktop del usuario
-    o Docker sin root. Se usa el que tiene los contenedores; antes, con sudo, se veía el del sistema vacío
-    y PostgreSQL y MinIO de la empresa aparecían como «instalados en el equipo»."""
-    if _MOTOR["elegido"] or ES_WINDOWS or os.environ.get("DOCKER_HOST"):
-        return
-    _MOTOR["elegido"] = True
+def _motores_candidatos():
+    """Docker del usuario que existen en este equipo (además del del sistema): [(nombre, "unix://…")]."""
     usuario = usuario_real()
     try:
         import pwd
@@ -287,7 +282,66 @@ def elegir_docker():
         casa, uid = os.path.expanduser("~"), os.getuid() if hasattr(os, "getuid") else 0
     candidatos = [("Docker Desktop", os.path.join(casa, ".docker", "desktop", "docker.sock")),
                   ("Docker del usuario (sin root)", "/run/user/%d/docker.sock" % uid)]
-    candidatos = [(n, "unix://" + p) for n, p in candidatos if os.path.exists(p)]
+    return [(n, "unix://" + p) for n, p in candidatos if os.path.exists(p)]
+
+
+def motores_docker():
+    """Todos los Docker de este equipo con cuántos contenedores ve cada uno (Linux). El elegido va marcado."""
+    if ES_WINDOWS:
+        return []
+    elegir_docker()
+    actual = os.environ.get("DOCKER_HOST") or ""
+    motores = []
+    for nombre, host in [("Docker del sistema", "")] + _motores_candidatos():
+        n = _contar_contenedores(host or None) if host else _contar_contenedores_sistema()
+        if n >= 0 or host == actual:
+            motores.append({"nombre": nombre, "host": host, "contenedores": n, "elegido": host == actual})
+    return motores
+
+
+def _contar_contenedores_sistema():
+    entorno = {k: v for k, v in os.environ.items() if k != "DOCKER_HOST"}
+    try:
+        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno)
+    except Exception:
+        return -1
+    return len(r.stdout.split()) if r.returncode == 0 else -1
+
+
+def usar_motor(host):
+    """Elige qué Docker usar ("" = el del sistema). Queda guardado: el vigilante usa el mismo."""
+    host = host or ""
+    if host and host not in [h for _, h in _motores_candidatos()]:
+        raise RuntimeError("Ese Docker no existe en este equipo.")
+    if host:
+        os.environ["DOCKER_HOST"] = host
+    else:
+        os.environ.pop("DOCKER_HOST", None)
+    _MOTOR.update(elegido=True, nombre=next((n for n, h in _motores_candidatos() if h == host), "") if host else "")
+    config = leer_config()
+    config["docker_host"] = host
+    guardar_config(config)
+    log("Se usa %s." % (_MOTOR["nombre"] or "el Docker del sistema"), "ok")
+    return {"ok": True}
+
+
+def elegir_docker():
+    """En Linux puede haber más de un Docker: el del sistema (el que ve sudo), Docker Desktop del usuario
+    o Docker sin root. Si elegiste uno, se usa ese; si no, el que tiene los contenedores. Antes, con sudo, se
+    veía el del sistema vacío y PostgreSQL y MinIO de la empresa aparecían como «instalados en el equipo»."""
+    if _MOTOR["elegido"] or ES_WINDOWS or os.environ.get("DOCKER_HOST"):
+        return
+    _MOTOR["elegido"] = True
+    candidatos = _motores_candidatos()
+    guardado = leer_config().get("docker_host")
+    if guardado is not None:
+        if guardado == "":
+            return
+        for nombre, host in candidatos:
+            if host == guardado:
+                os.environ["DOCKER_HOST"] = host
+                _MOTOR["nombre"] = nombre
+                return
     if not candidatos:
         return
     mejor, cuantos = None, _contar_contenedores()
@@ -347,8 +401,44 @@ def _ordenar(candidatos, *preferidos):
                   + (c["estado"] != "running", orden[c["nombre"]]))
 
 
+def _es_postgres(c):
+    """PostgreSQL por imagen o, si la imagen es propia (p. ej. «mayorista-db»), por el puerto 5432 del contenedor."""
+    if "bore" in c["imagen"]:
+        return False
+    return bool(re.search(r"postgres|postgis|timescale|pgvector", c["imagen"], re.I)
+                or re.search(r"(?<!\d)5432/tcp", c.get("puertos") or ""))
+
+
+def _es_minio(c):
+    if "bore" in c["imagen"]:
+        return False
+    return bool(re.search(r"minio", c["imagen"] + " " + c["nombre"], re.I))
+
+
+def _puertos_cortos(texto):
+    """«0.0.0.0:5433->5432/tcp, :::5433->5432/tcp» → «5433→5432» (sin repetir IPv4/IPv6)."""
+    vistos = []
+    for publico, interno in re.findall(r":(\d+(?:-\d+)?)->(\d+(?:-\d+)?)/tcp", texto or ""):
+        par = "%s→%s" % (publico, interno)
+        if par not in vistos:
+            vistos.append(par)
+    if not vistos:
+        vistos = ["%s (interno)" % p for p in dict.fromkeys(re.findall(r"(?<![:\d])(\d+)/tcp", texto or ""))]
+    return ", ".join(vistos)
+
+
+def todos_los_contenedores(lista):
+    """Todos los contenedores del Docker elegido, con qué son y sus puertos (para verlos todos en la pantalla)."""
+    salida = []
+    for c in lista:
+        rol = "bore" if "bore" in c["imagen"] else "postgres" if _es_postgres(c) else "minio" if _es_minio(c) else "otro"
+        salida.append(dict(_resumen(c), rol=rol, estado=c["estado"], puertos=_puertos_cortos(c.get("puertos"))))
+    return salida
+
+
 def _resumen(c):
-    return {"nombre": c["nombre"], "imagen": c["imagen"], "corriendo": c["estado"] == "running", "creado": c.get("creado", "")}
+    return {"nombre": c["nombre"], "imagen": c["imagen"], "corriendo": c["estado"] == "running", "creado": c.get("creado", ""),
+            "puertos": _puertos_cortos(c.get("puertos"))}
 
 
 def inspeccionar(nombre):
@@ -493,8 +583,7 @@ def _credenciales_contenedor(env):
 
 
 def analizar_postgres(lista, config, elegido=None):
-    candidatos = [c for c in lista if re.search(r"postgres|postgis|timescale", c["imagen"], re.I)
-                  and "bore" not in c["imagen"]]
+    candidatos = [c for c in lista if _es_postgres(c)]
     preferido = config.get("pg_contenedor")
     candidatos = _ordenar(candidatos, elegido, preferido)
     if candidatos:
@@ -529,7 +618,7 @@ def analizar_postgres(lista, config, elegido=None):
 
 
 def analizar_minio(lista, elegido=None, config=None):
-    candidatos = [x for x in lista if re.search(r"minio/minio|bitnami/minio|quay.io/minio|(^|/)minio(:|$)", x["imagen"], re.I)]
+    candidatos = [x for x in lista if _es_minio(x)]
     candidatos = _ordenar(candidatos, elegido, (config or {}).get("minio_contenedor"))
     c = candidatos[0] if candidatos else None
     if c:
@@ -617,7 +706,7 @@ def analizar(pg_elegido=None, minio_elegido=None):
         "sistema": {"so": "%s %s" % (platform.system(), platform.release()), "equipo": socket.gethostname(),
                     "python": platform.python_version(), "carpeta": carpeta_datos(),
                     "admin": (not ES_WINDOWS and hasattr(os, "geteuid") and os.geteuid() == 0)},
-        "docker": docker_estado(),
+        "docker": dict(docker_estado(), motores=motores_docker()),
         "internet": {"bore_pub": puerto_abierto(BORE_HOST, BORE_PUERTO_CONTROL, 5)},
         "config": sin_secretos(config),
     }
@@ -626,6 +715,7 @@ def analizar(pg_elegido=None, minio_elegido=None):
         resultado["postgres"] = analizar_postgres(lista, config, pg_elegido)
         resultado["minio"] = analizar_minio(lista, minio_elegido, config)
         resultado["bore"] = analizar_bore(lista)
+        resultado["todos"] = todos_los_contenedores(lista)
     else:
         resultado["postgres"] = {"estado": "desconocido", "bases": []}
         resultado["minio"] = {"estado": "desconocido"}

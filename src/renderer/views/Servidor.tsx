@@ -11,7 +11,9 @@ import { AsyncButton } from '../components/Button';
 type Call = (path: string, opts?: RequestInit) => Promise<any>;
 type Toast = (title: string, body?: string, kind?: any) => void;
 
-interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string }
+interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string; puertos?: string; rol?: string; estado?: string }
+interface MotorDocker { nombre: string; host: string; contenedores: number; elegido: boolean }
+const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
 interface Base { nombre: string; dueno: string; tablas: number | null }
 interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null }
 interface LineaLog { hora: string; nivel: string; texto: string }
@@ -162,6 +164,17 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     await accionServicio('todo');
   };
 
+  const motores: MotorDocker[] = dock.motores || [];
+  const todos: Contenedor[] = a?.todos || [];
+  const [verTodos, setVerTodos] = useState(false);
+  const cambiarMotor = async (host: string) => {
+    const r = await call('/api/servidor/motor', { method: 'POST', body: JSON.stringify({ host }) });
+    toast('Docker', r.message, r.ok ? 'success' : 'danger');
+    setPgElegido(''); setMinioElegido(''); setBase('');
+    analizar();
+    cargarServicios();
+  };
+
   const estadoTunel = (t: Tunel) => !t.puerto ? 'sin puerto' : !t.en_linea ? 'no responde'
     : t.ssl === true ? 'en línea con SSL' : t.ssl === false ? 'en línea SIN SSL' : 'en línea';
 
@@ -183,6 +196,13 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
                   : dock.corriendo ? `Encendido · ${dock.version}${dock.motor ? ' · ' + dock.motor : ''}`
                   : dock.instalado ? 'Instalado pero apagado' : 'No está instalado'}
               </div>
+              {motores.length > 1 && (
+                <select className="input" style={{ marginTop: 6 }} value={motores.find(m => m.elegido)?.host ?? ''}
+                        title="Este equipo tiene más de un Docker" onChange={e => cambiarMotor(e.target.value)}>
+                  {motores.map(m => <option key={m.host || 'sistema'} value={m.host}>
+                    {m.nombre} — {m.contenedores >= 0 ? `${m.contenedores} contenedores` : 'sin permiso'}</option>)}
+                </select>
+              )}
               {!dock.instalado && <AsyncButton size="sm" variant="primary" onClick={() => empezar('instalar-docker', '/api/servidor/instalar-docker')}>Instalar Docker</AsyncButton>}
               {dock.instalado && !dock.corriendo && !dock.sin_permiso && <AsyncButton size="sm" variant="primary" onClick={() => empezar('encender-docker', '/api/servidor/encender-docker')}>Encender Docker</AsyncButton>}
             </div>
@@ -244,6 +264,30 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         )}
       </Card>
 
+      {a && dock.corriendo && (
+        <Card title={`Contenedores en este equipo (${todos.length})`} icon={<span>🐳</span>}
+              sub={`Todo lo que tiene ${motores.find(m => m.elegido)?.nombre || 'Docker'}, con sus puertos. Abajo eliges cuál PostgreSQL y cuál MinIO usa FacturaPro.`}
+              right={todos.length > 6 ? <button className="btn btn-sm" onClick={() => setVerTodos(v => !v)}>{verTodos ? 'Ver menos' : 'Ver todos'}</button> : undefined}>
+          {todos.length === 0 && <div className="muted fs-12">No hay contenedores en este Docker.</div>}
+          {(verTodos ? todos : todos.slice(0, 6)).map(c => {
+            const usado = c.nombre === pg.contenedor || c.nombre === a?.minio?.contenedor;
+            return (
+              <div key={c.nombre} className="row between items-center gap-8" style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="fs-13"><span style={{ color: c.corriendo ? 'var(--success)' : 'var(--text-muted)' }}>●</span>{' '}
+                    <b className="mono">{c.nombre}</b> <span className="muted fs-12">{c.imagen}</span></div>
+                  <div className="fs-12 muted">{c.corriendo ? 'encendido' : (c.estado || 'apagado')}{c.puertos ? ` · puertos ${c.puertos}` : ' · sin puertos publicados'}</div>
+                </div>
+                <div className="row gap-4" style={{ flexShrink: 0 }}>
+                  {usado && <span className="badge ok">en uso</span>}
+                  <span className={`badge ${c.rol === 'otro' ? 'neutral' : ''}`}>{ROL[c.rol || 'otro']}</span>
+                </div>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+
       {tuneles.length > 0 && (
         <Card title="Túneles abiertos" sub="Lo que está publicado en internet. Cerrar un túnel no apaga el contenedor." icon={<span>🔗</span>}>
           {tuneles.map(t => (
@@ -258,12 +302,12 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
       {a && dock.corriendo && (
         <Card title="¿Qué configuro?" icon={<span>⚙</span>}>
-          {listaPg.length > 1 && (
+          {listaPg.length > 0 && (
             <div className="form-row">
-              <label className="form-label">PostgreSQL que usará FacturaPro</label>
+              <label className="form-label">PostgreSQL que usará FacturaPro ({listaPg.length} encontrado{listaPg.length === 1 ? '' : 's'})</label>
               <select className="input" value={pgElegido || pg.contenedor}
                       onChange={e => { setPgElegido(e.target.value); setBase(''); analizar(e.target.value, minioElegido || undefined); }}>
-                {listaPg.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.corriendo ? '' : ' (apagado)'}</option>)}
+                {listaPg.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
             </div>
           )}
@@ -309,11 +353,11 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             <input type="checkbox" checked={minio} onChange={e => setMinio(e.target.checked)} />
             <span>Publicar también MinIO (opcional: tus archivos ya se guardan en tu base)</span>
           </label>
-          {minio && listaMinio.length > 1 && (
+          {listaMinio.length > 0 && (
             <div className="form-row">
-              <label className="form-label">¿Qué MinIO publico?</label>
+              <label className="form-label">MinIO ({listaMinio.length} encontrado{listaMinio.length === 1 ? '' : 's'}){minio ? ': ¿cuál publico?' : ''}</label>
               <select className="input" value={minioElegido || listaMinio[0].nombre} onChange={e => setMinioElegido(e.target.value)}>
-                {listaMinio.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.corriendo ? '' : ' (apagado)'}</option>)}
+                {listaMinio.map(c => <option key={c.nombre} value={c.nombre}>{c.nombre} — {c.imagen}{c.puertos ? ' · ' + c.puertos : ''}{c.corriendo ? '' : ' (apagado)'}</option>)}
               </select>
             </div>
           )}

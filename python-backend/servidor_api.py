@@ -44,6 +44,10 @@ class Codigo(BaseModel):
     codigo: str
 
 
+class Motor(BaseModel):
+    host: str = ""
+
+
 class Nombre(BaseModel):
     nombre: str
 
@@ -87,6 +91,15 @@ def _tarea(nombre: str, funcion, *args) -> Dict[str, Any]:
 def configurar(o: Configurar) -> Dict[str, Any]:
     opciones = {k: v for k, v in o.model_dump().items() if v not in (None, "")}
     return _tarea("configurar", fs.configurar, opciones)
+
+
+@router.post("/motor")
+def motor(m: Motor) -> Dict[str, Any]:
+    """Cuando el equipo tiene más de un Docker (el del sistema, Docker Desktop, sin root): cuál usar."""
+    try:
+        return dict(fs.usar_motor(m.host), message="Docker cambiado")
+    except RuntimeError as e:
+        return {"ok": False, "message": str(e)}
 
 
 @router.post("/instalar-docker")
