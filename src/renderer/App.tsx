@@ -5,6 +5,7 @@ import { ToastProvider, useToast } from './components/Toast';
 import { CommandPalette, CommandItem } from './components/CommandPalette';
 import { UpdateModal } from './components/UpdateModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { AvisosProvider, CentroAvisos, useAvisosDelServidor } from './components/Avisos';
 import { DashboardView } from './views/Dashboard';
 import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
@@ -54,6 +55,9 @@ function AppInner() {
   const commands: CommandItem[] = useMemo(() => TABS.map(t => ({
     id: t.id, label: t.label, desc: t.desc, icon: t.icon, run: () => goto(t.id),
   })), [goto]);
+
+  // Eventos del túnel para el centro de notificaciones (también con la ventana escondida en la bandeja)
+  useAvisosDelServidor(call, state !== 'connecting' && state !== 'error');
 
   if (state === 'connecting') {
     return (
@@ -106,6 +110,7 @@ function AppInner() {
         <header className="topbar">
           <div className="topbar-title">{activeDef.icon} {activeDef.label}</div>
           <div className="topbar-spacer" />
+          <CentroAvisos />
           {/* Theme toggle */}
           <div className="segmented">
             <button className={mode === 'system' ? 'active' : ''} onClick={() => change('system')} title="Tema del sistema">Auto</button>
@@ -135,6 +140,7 @@ function AppInner() {
 
 export function App() {
   return (
+    <AvisosProvider>
     <ToastProvider>
       <ErrorBoundary nombre="app">
         <AppInner />
@@ -143,6 +149,7 @@ export function App() {
         <UpdateModal />
       </ErrorBoundary>
     </ToastProvider>
+    </AvisosProvider>
   );
 }
 

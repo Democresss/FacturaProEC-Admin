@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -94,6 +94,48 @@ def log(texto, nivel="info"):
             pass
     except Exception:            # sin consola (programa con ventana)
         pass
+
+
+ARCHIVO_EVENTOS = "eventos.jsonl"
+
+
+def evento(texto, nivel="info"):
+    """Algo importante que el usuario debe ver aunque no esté mirando (túnel caído, puerto nuevo, aviso a
+    FacturaPro). Queda en eventos.jsonl de la carpeta de datos: lo lee el centro de notificaciones de la app,
+    venga del vigilante de la app o del servicio. No repite el mismo texto dentro de una hora."""
+    log(texto, nivel)
+    ruta = os.path.join(carpeta_datos(), ARCHIVO_EVENTOS)
+    try:
+        previos = leer_eventos()
+        if previos and previos[-1].get("texto") == texto and time.time() - float(previos[-1].get("t") or 0) < 3600:
+            return
+        os.makedirs(carpeta_datos(), exist_ok=True)
+        nuevo = {"t": time.time(), "hora": time.strftime("%Y-%m-%d %H:%M:%S"), "nivel": nivel, "texto": texto}
+        if len(previos) >= 300:   # se recorta: quedan los últimos 200
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in previos[-200:]))
+        with open(ruta, "a", encoding="utf-8") as f:
+            f.write(json.dumps(nuevo, ensure_ascii=False) + "\n")
+        _devolver_dueno(ruta)
+    except OSError:
+        pass
+
+
+def leer_eventos(desde=0.0):
+    """Eventos con t > desde (segundos epoch), del más viejo al más nuevo."""
+    eventos = []
+    try:
+        with open(os.path.join(carpeta_datos(), ARCHIVO_EVENTOS), encoding="utf-8") as f:
+            for linea in f:
+                try:
+                    e = json.loads(linea)
+                except ValueError:
+                    continue
+                if float(e.get("t") or 0) > float(desde or 0):
+                    eventos.append(e)
+    except OSError:
+        pass
+    return eventos
 
 
 def run(cmd, timeout=180, entrada=None):
@@ -1028,8 +1070,8 @@ def informar_direccion(puerto, config=None, host=None):
     config = config if config is not None else leer_config()
     codigo = config.get("enlace_facturapro") or ""
     if not codigo:
-        log("Sin enlace con FacturaPro: cambia la dirección a mano en FacturaPro → Conecta tu base de datos: %s:%s"
-            % (host or BORE_HOST, puerto), "aviso")
+        evento("Sin enlace con FacturaPro: cambia la dirección a mano en FacturaPro → Conecta tu base de datos: %s:%s"
+               % (host or BORE_HOST, puerto), "aviso")
         return False
     try:
         datos = leer_enlace(codigo)
@@ -1047,18 +1089,18 @@ def informar_direccion(puerto, config=None, host=None):
             motivo = json.loads(e.read().decode("utf-8") or "{}").get("error") or e.reason
         except Exception:
             motivo = e.reason
-        log("FacturaPro no aceptó la dirección nueva: %s" % motivo, "error")
+        evento("FacturaPro no aceptó la dirección nueva: %s" % motivo, "error")
         return False
     except Exception as e:  # noqa: BLE001 - sin internet, DNS…
         log("No se pudo avisar a FacturaPro (%s). Se reintentará." % e, "aviso")
         return False
     if not respuesta.get("success"):
-        log("FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error"), "error")
+        evento("FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error"), "error")
         return False
     config = leer_config()
     config.update(puerto_informado=int(puerto), informado=time.strftime("%Y-%m-%d %H:%M"))
     guardar_config(config)
-    log("FacturaPro ya usa %s:%s%s" % (host or BORE_HOST, puerto, " (sin cambios)" if respuesta.get("sin_cambios") else ""), "ok")
+    evento("FacturaPro ya usa %s:%s%s" % (host or BORE_HOST, puerto, " (sin cambios)" if respuesta.get("sin_cambios") else ""), "ok")
     return True
 
 
@@ -1079,7 +1121,7 @@ def reparar_tunel(config=None):
     config = config if config is not None else leer_config()
     anterior = config.get("bore_puerto_pg")
     if not iniciar_docker():
-        log("Docker no enciende: no se puede reparar el túnel todavía.", "error")
+        evento("Docker no enciende: no se puede levantar el túnel todavía (se reintenta).", "error")
         return None
     pg = config.get("pg_contenedor")
     if pg and any(c["nombre"] == pg and c["estado"] != "running" for c in contenedores()):
@@ -1095,7 +1137,7 @@ def reparar_tunel(config=None):
         log(str(e), "error")
         return None
     if puerto != anterior:
-        log("bore.pub dio otro puerto: %s → %s" % (anterior, puerto), "aviso")
+        evento("bore.pub dio otro puerto: %s → %s" % (anterior, puerto), "aviso")
         config = leer_config()
         config.update(bore_puerto_pg=puerto, actualizado=time.strftime("%Y-%m-%d %H:%M"))
         guardar_config(config)
@@ -1118,8 +1160,10 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
     if estado["fallos"] < fallos_para_reparar:
         return "caido"
     estado["fallos"] = 0
+    evento("El túnel %s:%s dejó de responder desde internet: levantándolo de nuevo…" % (BORE_HOST, puerto), "aviso")
     nuevo = reparar_tunel(config)
     if not nuevo:
+        evento("No se pudo levantar el túnel: FacturaPro no llega a tu base. Se reintenta solo.", "error")
         return "sin_reparar"
     for _ in range(6):
         if sonda_ssl(BORE_HOST, nuevo, 8) is not None:
@@ -1127,6 +1171,8 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
         time.sleep(2)
     if nuevo != puerto or leer_config().get("puerto_informado") != nuevo:
         informar_direccion(nuevo)
+    if nuevo == puerto:
+        evento("El túnel volvió a estar en línea (%s:%s, misma dirección)." % (BORE_HOST, nuevo), "ok")
     return "reparado" if nuevo == puerto else "puerto_nuevo"
 
 
@@ -1599,7 +1645,8 @@ def servicios():
     est = docker_estado()
     d = docker_al_arrancar() if est["instalado"] else {"activo": False, "como": "no está instalado"}
     lista.append({"id": "docker", "tipo": "docker", "nombre": "Docker", "corriendo": est["corriendo"], "automatico": d["activo"],
-                  "detalle": "%s · %s" % ("encendido" if est["corriendo"] else "apagado", d["como"]),
+                  "detalle": ("%s · %s" % ("encendido" if est["corriendo"] else "apagado", d["como"])) if est["instalado"]
+                             else "No está instalado (en «Servidor y túnel» → Instalar Docker)",
                   "accion": "docker-al-arrancar" if est["instalado"] and d["activo"] is False else None})
     if est["corriendo"]:
         importantes = {config.get("pg_contenedor"), config.get("minio_contenedor")} - {None, ""}
@@ -1633,7 +1680,11 @@ def servicios():
     vig, vivo = vigilante_info(), vigilante_vivo()
     if vivo:
         quien = {"app": "la app abierta", "servicio": "el servicio"}.get(vivo.get("modo"), vivo.get("modo") or "?")
-        estado = "corriendo en %s · revisó %s (%s)" % (quien, _hace(time.time() - float(vivo.get("t") or 0)), vivo.get("resultado") or "")
+        resultado = vivo.get("resultado") or ""
+        resultado = {"ok": "túnel en línea", "sin_tunel": "aún no hay túnel configurado", "caido": "el túnel no responde",
+                     "reparado": "túnel levantado de nuevo", "puerto_nuevo": "túnel con puerto nuevo",
+                     "sin_reparar": "no pudo levantar el túnel", "iniciando": "arrancando"}.get(resultado, resultado)
+        estado = "corriendo en %s · revisó %s: %s" % (quien, _hace(time.time() - float(vivo.get("t") or 0)), resultado)
     else:
         estado = "no está corriendo"
     if vig["instalado"]:

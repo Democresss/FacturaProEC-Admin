@@ -125,6 +125,12 @@ def vigilante() -> Dict[str, Any]:
     return _tarea("vigilante", fs.automatizar, "vigilante", None, _pedir_admin())
 
 
+@router.get("/avisos")
+def avisos(desde: float = 0) -> Dict[str, Any]:
+    """Lo importante que pasó con el túnel (lo escribe el vigilante, el de la app o el servicio)."""
+    return {"ok": True, "data": fs.leer_eventos(desde)[-100:]}
+
+
 @router.get("/servicios")
 def servicios() -> Dict[str, Any]:
     """Qué se levanta solo (Docker, túneles, base, vigilante) y qué no."""
