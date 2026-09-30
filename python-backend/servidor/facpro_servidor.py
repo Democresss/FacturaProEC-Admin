@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -750,6 +750,30 @@ def _puerto_bore_de_logs(nombre):
     return int(ultimo) if ultimo else None, out or ""
 
 
+def _proc_leer(pid, archivo):
+    try:
+        with open("/proc/%s/%s" % (pid, archivo), encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _es_de_contenedor(pid):
+    """¿Ese proceso vive dentro de un contenedor? En Linux los procesos de los contenedores del Docker del sistema se
+    ven en «ps» como cualquier otro: el túnel de un contenedor NO es un bore «fuera de Docker»."""
+    if re.search(r"docker|containerd|libpod|kubepods|lxc", _proc_leer(pid, "cgroup")):
+        return True
+    p = pid
+    for _ in range(8):
+        m = re.search(r"\)\s+\S+\s+(\d+)", _proc_leer(p, "stat"))
+        if not m or int(m.group(1)) <= 1:
+            return False
+        p = int(m.group(1))
+        if re.match(r"(containerd-shim|conmon|runc)", _proc_leer(p, "comm").strip()):
+            return True
+    return False
+
+
 def procesos_bore():
     """bore corriendo FUERA de Docker (por ejemplo el que se lanzó a mano)."""
     encontrados = []
@@ -767,7 +791,7 @@ def procesos_bore():
         code, out = run(["ps", "-eo", "pid=,args="], timeout=30)
         for linea in out.splitlines():
             partes = linea.strip().split(None, 1)
-            if len(partes) == 2 and re.search(r"(^|/)bore\s+local\b", partes[1]):
+            if len(partes) == 2 and re.search(r"(^|/)bore\s+local\b", partes[1]) and not _es_de_contenedor(partes[0]):
                 encontrados.append({"pid": int(partes[0]), "comando": partes[1]})
     for p in encontrados:
         m = re.search(r"--port[ =](\d+)", p["comando"] or "")
