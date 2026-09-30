@@ -17,7 +17,9 @@ interface MotorDocker { nombre: string; host: string; contenedores: number; eleg
 const creado = (c: Contenedor) => c.creado ? ` · creado ${c.creado.slice(0, 10)}` : '';
 const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
 interface Base { nombre: string; dueno: string; tablas: number | null }
-interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null }
+interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null;
+                 motor?: string; host?: string }
+const URL_ENLACE = 'https://facturadorproecuador.org/v2/conectar-bd#direccion';
 interface LineaLog { hora: string; nivel: string; texto: string }
 interface Servicio {
   id: string; tipo: string; nombre: string; detalle: string; corriendo: boolean; automatico: boolean | null;
@@ -120,7 +122,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const pideClave = !!baseSel && (baseSel.dueno !== pg.usuario || !pg.tiene_clave);
   const listaPg: Contenedor[] = pg.contenedores || [];
   const listaMinio: Contenedor[] = a?.minio?.contenedores || [];
-  const tuneles: Tunel[] = a?.bore?.contenedores || [];
+  // Túneles del Docker elegido y de los otros Docker del equipo (antes los de «sudo docker» no se veían)
+  const tuneles: Tunel[] = [...(a?.bore?.contenedores || []), ...(a?.bore?.otros_docker || [])];
   const vig = a?.vigilante || {};
 
   const configurar = () => {
@@ -299,9 +302,10 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         <Card title="Túneles abiertos" sub="Lo que está publicado en internet. Cerrar un túnel no apaga el contenedor." icon={<span>🔗</span>}>
           {tuneles.map(t => (
             <div key={t.contenedor} className="row between items-center" style={{ padding: '6px 0' }}>
-              <span className="mono fs-12">{t.contenedor}: bore.pub:{t.puerto || '?'} → {t.servicio} · {t.corriendo ? estadoTunel(t) : 'apagado'}</span>
+              <span className="mono fs-12">{t.contenedor}: bore.pub:{t.puerto || '?'} → {t.servicio} · {t.corriendo ? estadoTunel(t) : 'apagado'}
+                {t.motor ? <span className="badge neutral" style={{ marginLeft: 6 }}>en {t.motor}</span> : null}</span>
               <AsyncButton size="sm" variant="danger" confirmText={`El túnel «${t.contenedor}» dejará de verse desde internet.`}
-                           onClick={() => empezar('cerrar-tunel', '/api/servidor/cerrar-tunel', { nombre: t.contenedor })}>Cerrar túnel</AsyncButton>
+                           onClick={() => empezar('cerrar-tunel', '/api/servidor/cerrar-tunel', { nombre: t.contenedor, host: t.host || null })}>Cerrar túnel</AsyncButton>
             </div>
           ))}
         </Card>
@@ -396,6 +400,23 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               if (r.ok) { setEnlace(''); analizar(pgElegido || undefined, minioElegido || undefined); }
             }}>Guardar</AsyncButton>
           </div>
+          {!vig.enlace && (
+            <div className="fs-12" style={{ margin: '10px 0', padding: 10, borderRadius: 8, background: 'var(--warning-faint)' }}>
+              <div className="fw-700" style={{ marginBottom: 4 }}>Cómo sacar el código de enlace (una sola vez)</div>
+              <ol style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+                <li>Abre FacturaPro con tu usuario administrador → <b>Conecta tu base de datos</b> → <b>Dirección de tu base</b>.</li>
+                <li>Pulsa <b>Generar código de enlace</b> y cópialo (empieza con <span className="mono">FPENLACE.</span>).</li>
+                <li>Pégalo arriba y pulsa <b>Guardar</b>. Listo: si bore.pub cambia el puerto, FacturaPro se entera solo.</li>
+              </ol>
+              <button className="btn btn-sm btn-primary" onClick={() => (window as any).electronAPI?.openExternal?.(URL_ENLACE)}>
+                Abrir FacturaPro → Conecta tu base de datos
+              </button>
+              <div className="fs-11 muted" style={{ marginTop: 6 }}>
+                Si en esa página no aparece «Dirección de tu base», FacturaPro todavía no tiene la versión nueva: mientras tanto, cambia la
+                dirección a mano ahí mismo{a?.config?.bore_puerto_pg ? ` (bore.pub:${a.config.bore_puerto_pg})` : ''}.
+              </div>
+            </div>
+          )}
           <div className="fs-12" style={{ margin: '8px 0', color: vig.enlace && vig.instalado ? '#22c55e' : '#f59e0b' }}>
             {vig.enlace ? `✓ Enlazado con ${vig.facturapro}` : 'Sin enlace: si cambia el puerto tendrás que cambiarlo a mano en FacturaPro'}
             {' · '}{vig.instalado ? 'vigilante instalado' : 'vigilante no instalado'}

@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -138,11 +138,11 @@ def leer_eventos(desde=0.0):
     return eventos
 
 
-def run(cmd, timeout=180, entrada=None):
+def run(cmd, timeout=180, entrada=None, env=None):
     """Ejecuta un comando. Devuelve (código, salida+errores). Nunca lanza excepción."""
     try:
         r = subprocess.run(cmd, input=entrada, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout)
+                           errors="replace", timeout=timeout, env=env)
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except FileNotFoundError:
         return 127, "no encontrado: %s" % cmd[0]
@@ -397,7 +397,10 @@ def docker_bin():
     return None
 
 
-def dk(*args, timeout=180):
+def dk(*args, timeout=180, host=None):
+    """docker …; con host, en ese Docker (otro motor del mismo equipo)."""
+    if host:
+        return run([DOCKER] + list(args), timeout=timeout, env=dict(os.environ, DOCKER_HOST=host))
     return run([DOCKER] + list(args), timeout=timeout)
 
 
@@ -470,8 +473,8 @@ def _resumen(c):
             "puertos": _puertos_cortos(c.get("puertos"))}
 
 
-def inspeccionar(nombre):
-    code, out = dk("inspect", nombre, timeout=30)
+def inspeccionar(nombre, host=None):
+    code, out = dk("inspect", nombre, timeout=30, host=host)
     if code != 0:
         return {}
     try:
@@ -711,12 +714,43 @@ def _servicio(destino):
     return {5432: "PostgreSQL", 9000: "MinIO", 9001: "Consola MinIO", 22: "SSH"}.get(destino, "puerto %s" % destino if destino else "?")
 
 
+def _puerto_de_args(args):
+    """El puerto fijo con el que se creó el túnel (--port N). bore usa ese o falla, así que es el real."""
+    m = re.search(r"--port[ =](\d+)", args if isinstance(args, str) else " ".join(args or []))
+    return int(m.group(1)) if m else None
+
+
+def tuneles_en_otros_docker():
+    """Túneles bore que están en OTRO Docker del equipo (no en el elegido), para que no queden escondidos."""
+    if ES_WINDOWS:
+        return []
+    actual = os.path.realpath((os.environ.get("DOCKER_HOST") or _motor_por_defecto())[7:])
+    salida = []
+    for nombre_motor, host in _motores_candidatos():
+        if os.path.realpath(host[7:]) == actual:
+            continue
+        code, out = dk("ps", "-a", "--format", "{{.Names}}\t{{.Image}}\t{{.State}}", timeout=30, host=host)
+        if code != 0:
+            continue
+        for linea in out.splitlines():
+            partes = linea.split("\t")
+            if len(partes) >= 3 and "bore" in partes[1]:
+                args = " ".join(((inspeccionar(partes[0], host).get("Config") or {}).get("Cmd") or []))
+                destino = re.search(r"local (\d+)", args)
+                t = {"contenedor": partes[0], "corriendo": partes[2] == "running", "puerto": _puerto_de_args(args),
+                     "destino": int(destino.group(1)) if destino else None, "motor": nombre_motor, "host": host}
+                t.update(_estado_tunel(t["puerto"], t["destino"]))
+                salida.append(t)
+    return salida
+
+
 def analizar_bore(lista):
     tuneles = []
     for c in lista:
         if "bore" in c["imagen"]:
             puerto, _ = _puerto_bore_de_logs(c["nombre"]) if c["estado"] == "running" else (None, "")
             args = " ".join(((inspeccionar(c["nombre"]).get("Config") or {}).get("Cmd") or []))
+            puerto = puerto or _puerto_de_args(args)
             destino = re.search(r"local (\d+)", args)
             t = {"contenedor": c["nombre"], "corriendo": c["estado"] == "running", "puerto": puerto,
                  "destino": int(destino.group(1)) if destino else None, "args": args}
@@ -727,7 +761,11 @@ def analizar_bore(lista):
         destino = re.search(r"local (\d+)", p.get("comando") or "")
         p["destino"] = int(destino.group(1)) if destino else None
         p.update(_estado_tunel(p.get("puerto"), p["destino"]))
-    return {"contenedores": tuneles, "procesos": procesos, "instalado": bool(shutil.which("bore"))}
+    try:
+        otros = tuneles_en_otros_docker()
+    except Exception:  # noqa: BLE001 - no impedir el análisis
+        otros = []
+    return {"contenedores": tuneles, "procesos": procesos, "otros_docker": otros, "instalado": bool(shutil.which("bore"))}
 
 
 def analizar(pg_elegido=None, minio_elegido=None):
@@ -963,14 +1001,16 @@ def detener_bore_fuera_de_docker():
         log("Se detuvo el bore anterior (fuera de Docker, puerto %s)" % (p.get("puerto") or "?"), "ok")
 
 
-def cerrar_tunel(nombre):
+def cerrar_tunel(nombre, host=None):
     """Cierra un túnel de bore (contenedor). Lo que estaba publicado deja de verse desde internet."""
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", nombre or ""):
         raise RuntimeError("Nombre de túnel inválido.")
-    info = inspeccionar(nombre)
+    if host and host not in [h for _, h in _motores_candidatos()]:
+        raise RuntimeError("Ese Docker no existe en este equipo.")
+    info = inspeccionar(nombre, host) if host else inspeccionar(nombre)
     if "bore" not in str((info.get("Config") or {}).get("Image") or ""):
         raise RuntimeError("«%s» no es un túnel de bore: no se toca." % nombre)
-    code, out = dk("rm", "-f", nombre)
+    code, out = dk("rm", "-f", nombre, host=host)
     if code != 0:
         raise RuntimeError("No se pudo cerrar el túnel: %s" % out[-200:])
     config = leer_config()
@@ -2038,7 +2078,7 @@ def servicios():
             if es_bore:
                 args = list((info.get("Config") or {}).get("Cmd") or [])
                 destino = int(args[args.index("local") + 1]) if "local" in args and args[args.index("local") + 1].isdigit() else None
-                puerto = _puerto_bore_de_logs(c["nombre"])[0] if corriendo else None
+                puerto = (_puerto_bore_de_logs(c["nombre"])[0] if corriendo else None) or _puerto_de_args(args)
                 nombre = "Túnel %s:%s → %s" % (BORE_HOST, puerto or "?", _servicio(destino))
                 tipo = "tunel"
             else:
@@ -2353,10 +2393,56 @@ def _abrir_como_admin(argumento):
         return
     if shutil.which("pkexec"):
         code, out = run(["pkexec"] + comando, timeout=3600)
-        if code != 0:
-            raise RuntimeError("No se pudo completar como administrador: %s" % out[-300:])
-        return
-    raise RuntimeError("Hace falta la clave de administrador: cierra y abre FacPro Servidor con «sudo».")
+        if code == 0:
+            return
+        if code == 126:
+            raise RuntimeError("Se canceló la ventana de la clave del sistema.")
+        # Por Escritorio remoto (xrdp) o sin agente de claves la ventana no aparece o no responde
+        log("La ventana de clave del sistema no respondió: se abre una terminal para escribir la clave ahí.", "aviso")
+    _admin_por_terminal(comando)
+
+
+def _admin_por_terminal(comando):
+    """Abre una terminal con «sudo …» para escribir la clave ahí y espera a que termine (hasta 10 minutos)."""
+    import shlex
+    linea = "sudo " + " ".join(shlex.quote(p) for p in comando)
+    os.makedirs(carpeta_datos(), exist_ok=True)
+    marca = os.path.join(carpeta_datos(), "admin-%d.fin" % os.getpid())
+    guion = os.path.join(carpeta_datos(), "pedir-clave.sh")
+    try:
+        os.remove(marca)
+    except OSError:
+        pass
+    with open(guion, "w", encoding="utf-8") as f:
+        f.write("#!/bin/bash\necho 'FacPro Server Manager necesita tu clave de administrador (solo esta vez).'\necho\n"
+                "%s\necho $? > %s\necho\nread -p 'Listo. Presiona Enter para cerrar esta ventana.' _\n" % (linea, shlex.quote(marca)))
+    os.chmod(guion, 0o700)
+    terminales = [("gnome-terminal", ["--", "bash", guion]), ("mate-terminal", ["-e", "bash " + shlex.quote(guion)]),
+                  ("xfce4-terminal", ["-e", "bash " + shlex.quote(guion)]), ("konsole", ["-e", "bash", guion]),
+                  ("tilix", ["-e", "bash " + shlex.quote(guion)]), ("x-terminal-emulator", ["-e", "bash", guion]),
+                  ("xterm", ["-e", "bash", guion])]
+    for nombre, args in terminales:
+        if shutil.which(nombre):
+            subprocess.Popen([nombre] + args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+    else:
+        raise RuntimeError("Abre una terminal y ejecuta esto (pide tu clave una sola vez):\n%s" % linea)
+    log("Se abrió una terminal: escribe ahí tu clave de administrador.", "paso")
+    for _ in range(600):
+        if os.path.exists(marca):
+            try:
+                codigo = int(open(marca, encoding="utf-8").read().strip() or 1)
+            except (OSError, ValueError):
+                codigo = 1
+            try:
+                os.remove(marca)
+            except OSError:
+                pass
+            if codigo != 0:
+                raise RuntimeError("No se completó (código %s). También puedes ejecutarlo en una terminal:\n%s" % (codigo, linea))
+            return
+        time.sleep(1)
+    raise RuntimeError("No se escribió la clave en la terminal. Puedes ejecutarlo tú en una terminal:\n%s" % linea)
 
 
 def interfaz_ventana():
@@ -2786,8 +2872,11 @@ def _avisar_ahora():
     puerto = leer_config().get("bore_puerto_pg")
     if not puerto:
         raise RuntimeError("Aún no hay túnel: primero pulsa «Configurar todo».")
+    if not leer_config().get("enlace_facturapro"):
+        raise RuntimeError("Falta el código de enlace de FacturaPro (los pasos están en «Que se arregle solo»). "
+                           "Mientras tanto, pon a mano en FacturaPro la dirección %s:%s." % (BORE_HOST, puerto))
     if not informar_direccion(puerto):
-        raise RuntimeError("No se pudo avisar a FacturaPro: mira el registro.")
+        raise RuntimeError("FacturaPro no aceptó el aviso: mira el Registro (abajo) para ver el motivo.")
     return True
 
 

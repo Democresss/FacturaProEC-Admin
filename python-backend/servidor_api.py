@@ -54,6 +54,7 @@ class Paquete(BaseModel):
 
 class Nombre(BaseModel):
     nombre: str
+    host: Optional[str] = None   # túnel en otro Docker del equipo
 
 
 class Accion(BaseModel):
@@ -134,7 +135,7 @@ def encender_docker() -> Dict[str, Any]:
 
 @router.post("/cerrar-tunel")
 def cerrar_tunel(n: Nombre) -> Dict[str, Any]:
-    return _tarea("cerrar-tunel", fs.cerrar_tunel, n.nombre)
+    return _tarea("cerrar-tunel", fs.cerrar_tunel, n.nombre, n.host or None)
 
 
 @router.get("/progreso")
