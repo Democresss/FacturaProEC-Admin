@@ -11,6 +11,7 @@ import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
 import { ConfigView } from './views/Config';
 import { ServidorView } from './views/Servidor';
+import logo from '../assets/logo-corto.png';
 
 // Base de Datos, SRI y VPN salieron del menú (confundían); sus archivos quedan en views/ por si se retoman.
 type TabId = 'servidor' | 'dashboard' | 'storage' | 'security' | 'config';
@@ -86,7 +87,10 @@ function AppInner() {
     <div className="app-shell" style={sidebarExpanded ? { gridTemplateColumns: '220px 1fr' } : undefined}>
       {/* Sidebar */}
       <nav className={`sidebar ${sidebarExpanded ? 'expanded' : ''}`}>
-        <div className="sidebar-logo" title="FacPro Server Manager" onClick={() => goto('servidor')}>F</div>
+        <div className="sidebar-logo" title="FacPro Server Manager" onClick={() => goto('servidor')}
+             style={{ background: 'transparent', padding: 2 }}>
+          <img src={logo} alt="FacPro" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+        </div>
         {TABS.map(t => (
           <button
             key={t.id}

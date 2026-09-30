@@ -57,12 +57,13 @@ class Accion(BaseModel):
     objetivo: Optional[str] = None
 
 
-ACCIONES = ("todo", "automatico", "docker-al-arrancar", "vigilante", "quitar-vigilante", "detener-suelto")
+ACCIONES = ("todo", "automatico", "docker-al-arrancar", "vigilante", "quitar-vigilante", "detener-suelto", "modo-admin")
 
 
 def _pedir_admin():
-    """En Linux, lo que necesita administrador se repite con la ventana de clave del sistema (pkexec)."""
-    return None if fs.ES_WINDOWS else fs._abrir_como_admin
+    """Lo que necesita administrador se repite como administrador: en Linux con la ventana de clave del sistema
+    (pkexec) y en Windows con la ventana de permiso de Windows."""
+    return fs._abrir_como_admin
 
 
 def _sin_claves(resultado: Any) -> Any:
@@ -178,7 +179,7 @@ def modo_linea_de_comandos(argv) -> Optional[int]:
     """El mismo ejecutable del backend sirve para el vigilante y para las tareas de administrador:
     bridge [--datos CARPETA] --vigilar | --instalar-vigilante | --quitar-vigilante | --docker-al-arrancar | --servicios
     | --instalar-docker | --enlace CODIGO | --version."""
-    banderas = ("--vigilar", "--instalar-vigilante", "--quitar-vigilante", "--docker-al-arrancar", "--servicios",
+    banderas = ("--vigilar", "--instalar-vigilante", "--quitar-vigilante", "--docker-al-arrancar", "--servicios", "--modo-admin",
                 "--instalar-docker", "--enlace", "--version", "--cli")
     if any(b in argv for b in banderas):
         return fs.main(list(argv))

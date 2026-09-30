@@ -1,6 +1,6 @@
 {
   "name": "facturaproec-admin",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "FacPro Server Manager - base de datos, túnel bore y servicios automáticos para FacturaPro",
   "author": "Democresss",
   "license": "MIT",
@@ -158,7 +158,7 @@
           ]
         }
       ],
-      "icon": "resources/icons/icon.png",
+      "icon": "resources/icons/linux",
       "artifactName": "FacturaProEC-Admin-${version}-${os}-${arch}.${ext}",
       "category": "Office",
       "maintainer": "FacturaProEC <jairloorramirez@gmail.com>",

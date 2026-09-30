@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -272,7 +272,9 @@ def _contar_contenedores(host=None):
 
 
 def _motores_candidatos():
-    """Docker del usuario que existen en este equipo (además del del sistema): [(nombre, "unix://…")]."""
+    """Todos los Docker de este equipo: [(nombre, "unix://…")]. Antes el del sistema no se listaba y el nombre
+    «Docker del sistema» se le daba al Docker por defecto del usuario (con Docker Desktop, era Docker Desktop): el
+    MinIO que se creó con «sudo docker» existía pero la app nunca lo mostraba."""
     usuario = usuario_real()
     try:
         import pwd
@@ -280,9 +282,34 @@ def _motores_candidatos():
         casa, uid = datos.pw_dir, datos.pw_uid
     except Exception:
         casa, uid = os.path.expanduser("~"), os.getuid() if hasattr(os, "getuid") else 0
-    candidatos = [("Docker Desktop", os.path.join(casa, ".docker", "desktop", "docker.sock")),
+    candidatos = [("Docker del sistema (el de «sudo docker»)", "/var/run/docker.sock"),
+                  ("Docker Desktop", os.path.join(casa, ".docker", "desktop", "docker.sock")),
                   ("Docker del usuario (sin root)", "/run/user/%d/docker.sock" % uid)]
-    return [(n, "unix://" + p) for n, p in candidatos if os.path.exists(p)]
+    vistos, salida = set(), []
+    for n, p in candidatos:
+        if os.path.exists(p) and os.path.realpath(p) not in vistos:
+            vistos.add(os.path.realpath(p))
+            salida.append((n, "unix://" + p))
+    return salida
+
+
+def _probar_motor(host):
+    """(cuántos contenedores, sin_permiso). -1 si no responde."""
+    entorno = dict(os.environ)
+    entorno["DOCKER_HOST"] = host
+    try:
+        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno)
+    except Exception:
+        return -1, False
+    if r.returncode == 0:
+        return len(r.stdout.split()), False
+    return -1, "permission denied" in (r.stderr or "").lower()
+
+
+def _motor_por_defecto():
+    """El socket que usa «docker» sin DOCKER_HOST (el contexto actual; con Docker Desktop es el suyo)."""
+    code, out = run([DOCKER, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], timeout=15)
+    return out.strip().splitlines()[0] if code == 0 and out.strip() else "unix:///var/run/docker.sock"
 
 
 def motores_docker():
@@ -290,12 +317,12 @@ def motores_docker():
     if ES_WINDOWS:
         return []
     elegir_docker()
-    actual = os.environ.get("DOCKER_HOST") or ""
+    actual = os.environ.get("DOCKER_HOST") or _motor_por_defecto()
     motores = []
-    for nombre, host in [("Docker del sistema", "")] + _motores_candidatos():
-        n = _contar_contenedores(host or None) if host else _contar_contenedores_sistema()
-        if n >= 0 or host == actual:
-            motores.append({"nombre": nombre, "host": host, "contenedores": n, "elegido": host == actual})
+    for nombre, host in _motores_candidatos():
+        n, sin_permiso = _probar_motor(host)
+        motores.append({"nombre": nombre, "host": host, "contenedores": n, "sin_permiso": sin_permiso,
+                        "elegido": os.path.realpath(host[7:]) == os.path.realpath(actual[7:]) if actual.startswith("unix://") else host == actual})
     return motores
 
 
@@ -313,6 +340,8 @@ def usar_motor(host):
     host = host or ""
     if host and host not in [h for _, h in _motores_candidatos()]:
         raise RuntimeError("Ese Docker no existe en este equipo.")
+    if host and _probar_motor(host)[1]:
+        raise RuntimeError("Tu usuario no tiene permiso para ese Docker: activa el «Modo administrador» (una sola vez).")
     if host:
         os.environ["DOCKER_HOST"] = host
     else:
@@ -1691,6 +1720,65 @@ def activar_docker_al_arrancar():
     return {"ok": True}
 
 
+def modo_admin_estado():
+    """¿La app puede usar todo sin pedir clave? Linux: tu usuario en el grupo docker (ve el Docker del sistema) y el
+    vigilante como servicio del sistema. Windows: tu usuario en docker-users y el vigilante al encender el equipo."""
+    vig = vigilante_info()
+    if ES_WINDOWS:
+        usuario = (os.environ.get("USERNAME") or "").lower()
+        code, out = run(["net", "localgroup", "docker-users"], timeout=20)
+        grupo = code != 0 or any(l.strip().lower() == usuario or l.strip().lower().endswith("\\" + usuario)
+                                 for l in (out or "").splitlines())
+        sistema = "encender el equipo" in vig.get("como", "")
+        faltan = ([] if grupo else ["tu usuario no está en docker-users"]) + ([] if sistema else ["el vigilante no arranca con el equipo"])
+        return {"activo": grupo and sistema, "vale_ya": grupo and sistema,
+                "detalle": "Todo con permiso: Docker y vigilante al encender el equipo" if not faltan else "Falta: " + ", ".join(faltan)}
+    usuario = usuario_real() or os.environ.get("USER") or ""
+    grupos = (run(["id", "-nG", usuario], timeout=10)[1] if usuario else "").split()
+    grupo = "docker" in grupos or not os.path.exists("/var/run/docker.sock")
+    try:
+        import grp
+        vale_ya = not os.path.exists("/var/run/docker.sock") or grp.getgrnam("docker").gr_gid in os.getgroups()
+    except (KeyError, ImportError):
+        vale_ya = not os.path.exists("/var/run/docker.sock")
+    sistema = os.path.exists(SERVICIO_LINUX)
+    faltan = ([] if grupo else ["tu usuario no puede usar el Docker del sistema"]) + ([] if sistema else ["el vigilante no es servicio del sistema"])
+    if faltan:
+        detalle = "Falta: " + ", ".join(faltan)
+    elif not vale_ya:
+        detalle = "Activado. Cierra sesión y vuelve a entrar (o reinicia) para que la app vea el Docker del sistema sin clave."
+    else:
+        detalle = "Todo con permiso: ve todos los Docker sin clave y el vigilante arranca con el equipo"
+    return {"activo": grupo and sistema, "vale_ya": vale_ya, "detalle": detalle}
+
+
+def activar_modo_admin():
+    """UNA sola vez con la clave del sistema: la app ve y usa todos los Docker sin volver a pedir clave y el vigilante
+    arranca con el equipo aunque nadie inicie sesión. (Estar en el grupo docker equivale a ser administrador.)"""
+    if ES_WINDOWS:
+        if not _es_admin_windows():
+            raise FaltaAdmin("Hace falta aceptar el permiso de administrador de Windows (una sola vez).")
+        usuario = os.environ.get("USERNAME", "")
+        if usuario and run(["net", "localgroup", "docker-users"], timeout=20)[0] == 0:
+            run(["net", "localgroup", "docker-users", usuario, "/add"], timeout=20)
+        instalar_vigilante()
+        log("Modo administrador activo: Docker sin pedir permiso y vigilante al encender el equipo.", "ok")
+        return {"ok": True}
+    if os.geteuid() != 0:
+        raise FaltaAdmin("Hace falta la clave del sistema (una sola vez).")
+    usuario = usuario_real()
+    if usuario and os.path.exists("/var/run/docker.sock"):
+        run(["groupadd", "-f", "docker"], timeout=20)
+        code, out = run(["usermod", "-aG", "docker", usuario], timeout=20)
+        if code != 0:
+            raise RuntimeError("No se pudo dar permiso de Docker a «%s»: %s" % (usuario, out[-200:]))
+    if shutil.which("systemctl") and run(["systemctl", "cat", "docker"], timeout=15)[0] == 0:
+        run(["systemctl", "enable", "docker"], timeout=60)
+    instalar_vigilante()
+    log("Modo administrador activo. Cierra sesión y vuelve a entrar para que la app vea el Docker del sistema sin clave.", "ok")
+    return {"ok": True}
+
+
 def hacer_automatico(nombre):
     """El contenedor se vuelve a levantar solo tras un reinicio o una caída (docker update --restart)."""
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", nombre or ""):
@@ -1785,6 +1873,10 @@ def servicios():
                   "automatico": vig["instalado"] and not vig.get("viejo"), "instalado": vig["instalado"],
                   "sin_enlace": not config.get("enlace_facturapro"), "detalle": detalle,
                   "accion": "vigilante" if (not vig["instalado"] or vig.get("viejo")) else None})
+    adm = modo_admin_estado()
+    lista.append({"id": "admin", "tipo": "admin", "nombre": "Modo administrador (no volver a pedir clave)",
+                  "corriendo": adm["vale_ya"], "automatico": adm["activo"], "detalle": adm["detalle"],
+                  "accion": None if adm["activo"] else "modo-admin"})
     pendientes = [x for x in lista if x["automatico"] is False]
     return {"servicios": lista, "todo_automatico": not pendientes, "pendientes": len(pendientes)}
 
@@ -1812,6 +1904,8 @@ def automatizar(accion, objetivo=None, pedir_admin=None):
         return con_admin(quitar_vigilante, "--quitar-vigilante")
     if accion == "detener-suelto":
         return detener_bore_suelto(objetivo)
+    if accion == "modo-admin":
+        return con_admin(activar_modo_admin, "--modo-admin")
     if accion != "todo":
         raise RuntimeError("Acción desconocida: %s" % accion)
     hechos, fallos = 0, []
@@ -2038,8 +2132,18 @@ def tarjetas_de(a):
 
 
 def _abrir_como_admin(argumento):
-    """Linux sin permisos: repite la acción con la ventana de contraseña del sistema (pkexec)."""
+    """Sin permisos: repite la acción como administrador (Linux: ventana de clave del sistema con pkexec;
+    Windows: la ventana de permiso de Windows)."""
     comando = (_comando_vigilante()[:-1]) + [argumento]
+    if ES_WINDOWS:
+        def q(x):
+            return "'%s'" % x.replace("'", "''")
+        orden = ("$p = Start-Process -FilePath %s -ArgumentList %s -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode"
+                 % (q(comando[0]), ",".join(q(subprocess.list2cmdline([x])) for x in comando[1:])))
+        code, out = run(["powershell", "-NoProfile", "-Command", orden], timeout=3600)
+        if code != 0:
+            raise RuntimeError("No se pudo completar como administrador (¿se canceló el permiso de Windows?). %s" % out[-200:])
+        return
     if shutil.which("pkexec"):
         code, out = run(["pkexec"] + comando, timeout=3600)
         if code != 0:
@@ -2767,7 +2871,8 @@ def main(argv=None):
                 pass
         vigilar()
         return 0
-    for bandera, funcion in (("--quitar-vigilante", quitar_vigilante), ("--docker-al-arrancar", activar_docker_al_arrancar)):
+    for bandera, funcion in (("--quitar-vigilante", quitar_vigilante), ("--docker-al-arrancar", activar_docker_al_arrancar),
+                             ("--modo-admin", activar_modo_admin)):
         if bandera in args:
             try:
                 funcion()

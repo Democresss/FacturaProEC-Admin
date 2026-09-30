@@ -12,7 +12,7 @@ type Call = (path: string, opts?: RequestInit) => Promise<any>;
 type Toast = (title: string, body?: string, kind?: any) => void;
 
 interface Contenedor { nombre: string; imagen: string; corriendo: boolean; creado?: string; puertos?: string; rol?: string; estado?: string }
-interface MotorDocker { nombre: string; host: string; contenedores: number; elegido: boolean }
+interface MotorDocker { nombre: string; host: string; contenedores: number; elegido: boolean; sin_permiso?: boolean }
 // «2024-05-01 12:00:00 -0500 -05» → «creado 2024-05-01»
 const creado = (c: Contenedor) => c.creado ? ` · creado ${c.creado.slice(0, 10)}` : '';
 const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
@@ -26,7 +26,7 @@ interface Servicio {
 
 const TEXTO_ACCION: Record<string, string> = {
   'automatico': 'Hacer automático', 'docker-al-arrancar': 'Encender con el equipo', 'vigilante': 'Instalar',
-  'detener-suelto': 'Detener', 'app': 'Arrancar con la sesión',
+  'detener-suelto': 'Detener', 'app': 'Arrancar con la sesión', 'modo-admin': 'Activar (pide la clave una vez)',
 };
 const colorServicio = (s: Servicio) => s.automatico === null ? 'var(--text-muted)'
   : s.automatico && s.corriendo ? 'var(--success)' : s.automatico ? 'var(--warning)' : s.corriendo ? 'var(--warning)' : 'var(--danger)';
@@ -201,9 +201,14 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               {motores.length > 1 && (
                 <select className="input" style={{ marginTop: 6 }} value={motores.find(m => m.elegido)?.host ?? ''}
                         title="Este equipo tiene más de un Docker" onChange={e => cambiarMotor(e.target.value)}>
-                  {motores.map(m => <option key={m.host || 'sistema'} value={m.host}>
-                    {m.nombre} — {m.contenedores >= 0 ? `${m.contenedores} contenedores` : 'sin permiso'}</option>)}
+                  {motores.map(m => <option key={m.host || 'sistema'} value={m.host} disabled={m.sin_permiso || m.contenedores < 0}>
+                    {m.nombre} — {m.contenedores >= 0 ? `${m.contenedores} contenedores` : m.sin_permiso ? 'sin permiso: activa el Modo administrador' : 'no responde'}</option>)}
                 </select>
+              )}
+              {motores.some(m => m.sin_permiso) && (
+                <div className="fs-11" style={{ color: 'var(--warning)', marginTop: 4 }}>
+                  Hay un Docker que tu usuario no puede ver (solo con «sudo»). Actívalo con «Modo administrador» en Servicios automáticos.
+                </div>
               )}
               {!dock.instalado && <AsyncButton size="sm" variant="primary" onClick={() => empezar('instalar-docker', '/api/servidor/instalar-docker')}>Instalar Docker</AsyncButton>}
               {dock.instalado && !dock.corriendo && !dock.sin_permiso && <AsyncButton size="sm" variant="primary" onClick={() => empezar('encender-docker', '/api/servidor/encender-docker')}>Encender Docker</AsyncButton>}
