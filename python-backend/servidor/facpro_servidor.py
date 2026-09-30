@@ -39,7 +39,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -160,7 +160,13 @@ def leer_config():
         return {}
 
 
+CLAVES_NO_GUARDAR = ("pg_clave", "url_postgres", "minio_clave")
+
+
 def guardar_config(datos):
+    # La clave de la base (y la dirección que la lleva) no se guardan en ningún archivo: se muestran una vez
+    # para copiarlas a FacturaPro, que las guarda cifradas. Se borran también las que dejaron versiones anteriores.
+    datos = {k: v for k, v in (datos or {}).items() if k not in CLAVES_NO_GUARDAR}
     carpeta = carpeta_datos()
     os.makedirs(carpeta, exist_ok=True)
     _devolver_dueno(carpeta)
@@ -556,8 +562,8 @@ def analizar(pg_elegido=None, minio_elegido=None):
         resultado["postgres"] = {"estado": "desconocido", "bases": []}
         resultado["minio"] = {"estado": "desconocido"}
         resultado["bore"] = analizar_bore([])
-    if config.get("url_postgres") and config.get("bore_puerto_pg"):
-        resultado["conexion"] = {"url": config["url_postgres"], "en_linea": sonda_ssl(BORE_HOST, config["bore_puerto_pg"], 6)}
+    if config.get("bore_puerto_pg"):
+        resultado["conexion"] = {"en_linea": sonda_ssl(BORE_HOST, config["bore_puerto_pg"], 6)}
     resultado["vigilante"] = {"enlace": bool(config.get("enlace_facturapro")), "facturapro": config.get("enlace_url") or "",
                               "informado": config.get("informado") or "", "puerto_informado": config.get("puerto_informado"),
                               "instalado": vigilante_instalado(), "corriendo": bool(VIGILANTE.get("hilo"))}
@@ -914,17 +920,20 @@ def configurar(opciones):
         log("PostgreSQL responde desde internet con SSL", "ok")
 
     url = "postgresql://%s:%s@%s:%d/%s?sslmode=require" % (quote(usuario, safe=""), quote(clave, safe=""), BORE_HOST, puerto_pg, quote(base, safe=""))
-    nuevo = dict(config, version=VERSION, pg_contenedor=(pg or {}).get("contenedor", ""), pg_usuario=usuario, pg_clave=clave,
-                 pg_base=base, bore_puerto_pg=puerto_pg, url_postgres=url, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+    nuevo = dict(config, version=VERSION, pg_contenedor=(pg or {}).get("contenedor", ""), pg_usuario=usuario,
+                 pg_base=base, bore_puerto_pg=puerto_pg, actualizado=time.strftime("%Y-%m-%d %H:%M"))
     if minio:
-        nuevo.update(minio_endpoint=minio["endpoint"], minio_usuario=minio.get("usuario", ""), minio_clave=minio.get("clave", ""),
+        nuevo.update(minio_endpoint=minio["endpoint"], minio_usuario=minio.get("usuario", ""),
                      bore_puerto_minio=minio.get("puerto"), minio_contenedor=minio.get("contenedor", ""))
     ruta = guardar_config(nuevo)
     with open(os.path.join(carpeta_datos(), "conexion.txt"), "w", encoding="utf-8") as f:
-        f.write("Pega esta dirección en FacturaPro → Conecta tu base de datos (%s):\n\n%s\n" % (URL_FACTURAPRO, url))
+        f.write("Dirección de tu base para FacturaPro → Conecta tu base de datos (%s).\n"
+                "La clave NO se guarda en este archivo: se mostró una sola vez en FacPro Servidor.\n"
+                "Si la perdiste, vuelve a pulsar «Configurar todo» con «Usuario propio» y te da una nueva.\n\n%s\n"
+                % (URL_FACTURAPRO, url.replace(":%s@" % quote(clave, safe=""), ":<tu clave>@")))
         if minio:
-            f.write("\nMinIO (Perfil → Almacenamiento → MinIO):\n  Endpoint: %s\n  Usuario: %s\n  Clave: %s\n"
-                    % (minio["endpoint"], minio.get("usuario", ""), minio.get("clave", "")))
+            f.write("\nMinIO (Perfil → Almacenamiento → MinIO):\n  Endpoint: %s\n  Usuario: %s\n"
+                    % (minio["endpoint"], minio.get("usuario", "")))
     if not ES_WINDOWS:
         os.chmod(os.path.join(carpeta_datos(), "conexion.txt"), 0o600)
     _devolver_dueno(os.path.join(carpeta_datos(), "conexion.txt"))
@@ -1062,10 +1071,7 @@ def reparar_tunel(config=None):
     if puerto != anterior:
         log("bore.pub dio otro puerto: %s → %s" % (anterior, puerto), "aviso")
         config = leer_config()
-        url = config.get("url_postgres") or ""
-        if anterior and url:
-            url = url.replace("@%s:%s/" % (BORE_HOST, anterior), "@%s:%s/" % (BORE_HOST, puerto))
-        config.update(bore_puerto_pg=puerto, url_postgres=url, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+        config.update(bore_puerto_pg=puerto, actualizado=time.strftime("%Y-%m-%d %H:%M"))
         guardar_config(config)
     return puerto
 
@@ -1736,7 +1742,7 @@ def interfaz_ventana():
             raiz.after(1500, lambda: b.configure(text="Copiar"))
         b = boton(fila, "Copiar", copiar, primario=True)
         b.pack(side="left", padx=(8, 0))
-        tk.Label(f, text="También quedó guardada en la carpeta facpro-servidor (conexion.txt). No la compartas por chat ni correo.",
+        tk.Label(f, text="La clave no se guarda en ningún archivo: cópiala ahora. Si la pierdes, «Configurar todo» con usuario propio te da otra.",
                  bg="#0d2318", fg=C_TENUE, font=chica).pack(anchor="w", pady=(6, 0))
 
     def guardar_enl():
@@ -2032,7 +2038,7 @@ function mostrar(r){
   let h='<h3>✔ ¡Listo! Tu base está en línea'+(r.ssl?' con SSL':'')+'</h3><p class="nota">Pega esta dirección en FacturaPro → <a href="'+esc(r.facturapro)+'" target="_blank" rel="noopener">Conecta tu base de datos</a>, pulsa «Probar conexión» y luego «Guardar y activar».</p>';
   h+='<div class="url"><code id="u">'+esc(r.url)+'</code><button class="pri" onclick="copiar(\'u\',this)">Copiar</button></div>';
   if(r.minio)h+='<p style="margin-top:12px">MinIO (Perfil → Almacenamiento → MinIO)</p><div class="url"><code id="m">Endpoint: '+esc(r.minio.endpoint)+'   Usuario: '+esc(r.minio.usuario||'')+'   Clave: '+esc(r.minio.clave||'')+'</code><button class="sec" onclick="copiar(\'m\',this)">Copiar</button></div>';
-  h+='<p class="nota" style="margin-top:10px">También quedó guardada en la carpeta facpro-servidor (conexion.txt). No la compartas por chat ni correo.</p>';
+  h+='<p class="nota" style="margin-top:10px">La clave no se guarda en ningún archivo: cópiala ahora. Si la pierdes, «Configurar todo» con usuario propio te da otra.</p>';
   b.innerHTML=h;b.classList.remove('oculto');
 }
 function copiar(id,btn){navigator.clipboard.writeText($(id).textContent).then(()=>{btn.textContent='Copiado';setTimeout(()=>btn.textContent='Copiar',1500)})}

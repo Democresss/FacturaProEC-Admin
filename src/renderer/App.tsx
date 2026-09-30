@@ -5,15 +5,13 @@ import { ToastProvider, useToast } from './components/Toast';
 import { CommandPalette, CommandItem } from './components/CommandPalette';
 import { UpdateModal } from './components/UpdateModal';
 import { DashboardView } from './views/Dashboard';
-import { DbViewerView } from './views/DbViewer';
-import { SriView } from './views/Sri';
 import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
-import { VpnView } from './views/Vpn';
 import { ConfigView } from './views/Config';
 import { ServidorView } from './views/Servidor';
 
-type TabId = 'dashboard' | 'db' | 'sri' | 'security' | 'storage' | 'servidor' | 'vpn' | 'config';
+// Base de Datos, SRI y VPN salieron del menú (confundían); sus archivos quedan en views/ por si se retoman.
+type TabId = 'servidor' | 'dashboard' | 'storage' | 'security' | 'config';
 
 interface TabDef {
   id: TabId;
@@ -23,21 +21,18 @@ interface TabDef {
 }
 
 const TABS: TabDef[] = [
-  { id: 'dashboard', label: 'Dashboard',    icon: '⌂', desc: 'Resumen del sistema' },
-  { id: 'db',        label: 'Base de Datos', icon: '🗄', desc: 'Viewer PostgreSQL' },
-  { id: 'sri',       label: 'SRI / Recepción', icon: '🧾', desc: 'IMAP + RUC' },
-  { id: 'security',  label: 'Seguridad',    icon: '🛡', desc: 'Guardian anti-intrusión' },
-  { id: 'storage',   label: 'Almacenamiento', icon: '💾', desc: 'SFTP / FTP / Docker' },
   { id: 'servidor',  label: 'Servidor y túnel', icon: '🛰', desc: 'Tu base lista para FacturaPro por internet (bore)' },
-  { id: 'vpn',       label: 'VPN',          icon: '🔒', desc: 'PG remoto + túneles' },
-  { id: 'config',    label: 'Configuración', icon: '⚙', desc: 'Tema, autostart, etc.' },
+  { id: 'dashboard', label: 'Dashboard',    icon: '⌂', desc: 'Resumen del equipo' },
+  { id: 'storage',   label: 'Almacenamiento', icon: '💾', desc: 'SFTP / FTP / Docker' },
+  { id: 'security',  label: 'Seguridad',    icon: '🛡', desc: 'Cifrado, SSL y guardián anti-intrusión' },
+  { id: 'config',    label: 'Configuración', icon: '⚙', desc: 'Tema, arranque automático' },
 ];
 
 function AppInner() {
   const { state, error, call } = useBridge();
   const { mode, effective, change } = useTheme();
   const { toast } = useToast();
-  const [activeTab, setActiveTab] = useState<TabId>('dashboard');
+  const [activeTab, setActiveTab] = useState<TabId>('servidor');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
@@ -123,12 +118,9 @@ function AppInner() {
 
         <main className="content">
           {activeTab === 'dashboard' && <DashboardView call={call} goto={goto} />}
-          {activeTab === 'db' && <DbViewerView call={call} toast={toast} />}
-          {activeTab === 'sri' && <SriView call={call} toast={toast} />}
           {activeTab === 'security' && <SecurityView call={call} toast={toast} />}
           {activeTab === 'storage' && <StorageView call={call} toast={toast} />}
           {activeTab === 'servidor' && <ServidorView call={call} toast={toast} />}
-          {activeTab === 'vpn' && <VpnView call={call} toast={toast} />}
           {activeTab === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
         </main>
       </div>

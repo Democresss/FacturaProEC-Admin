@@ -27,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pip install --no-cache-dir -r python-backend/requirements.txt customtkinter "pyinstaller==6.*"
+      - name: Probar el cifrado de claves (Linux)
+        run: python scripts/probar_cifrado.py
       - run: python scripts/build_bridge.py
       - name: Probar el backend compilado
         shell: bash
@@ -49,6 +51,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r python-backend/requirements.txt customtkinter "pyinstaller==6.*"
+      - name: Probar el cifrado de claves (Windows)
+        run: python scripts/probar_cifrado.py
       - run: python scripts/build_bridge.py
       - name: Probar el backend compilado
         shell: bash

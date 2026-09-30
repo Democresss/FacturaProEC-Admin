@@ -3,6 +3,8 @@ import sys
 import json
 import logging
 
+from cifrado_local import cifrar, descifrar, es_secreto, metodo, PREFIJO
+
 logger = logging.getLogger("config_manager")
 
 class ConfigManager:
@@ -15,6 +17,7 @@ class ConfigManager:
             self.config_dir = os.path.expanduser('~/.config/FacturaProEC')
 
         self.config_file = os.path.join(self.config_dir, 'config.json')
+        self._en_claro = []
         default_storage = r'C:\factura_uploads' if os.name == 'nt' else '/home/factura_uploads'
         
         self._defaults = {
@@ -25,11 +28,11 @@ class ConfigManager:
             'pg_port': 5432,
             'pg_db': 'facturapro_db',
             'pg_user': 'postgres_user',
-            'pg_pass': 'ClaveSegura123!',
+            'pg_pass': '',
             'remote_host': '192.168.1.58',
             'remote_port': 22,
             'remote_user': 'factura_sftp',
-            'remote_pass': 'ClaveSFTP123!',
+            'remote_pass': '',
             'remote_path': default_storage,
             'ftp_ip': '',
             'ftp_temp_minutes': 30,
@@ -64,7 +67,12 @@ class ConfigManager:
         }
         self.data = self.load_config()
         self._ensure_storage_dirs()
-        self.apply_windows_autostart(self.get('autostart', True))
+        if self._en_claro:
+            self.save_config()      # claves de versiones anteriores en texto claro: se cifran ya
+        # Dentro de la app Electron el arranque automático lo maneja Electron (con la app real). Antes, cada vez
+        # que abría la app, el backend escribía su propio Python en el arranque de Windows.
+        if not os.environ.get("BRIDGE_PORT"):
+            self.apply_windows_autostart(self.get('autostart', True))
 
     def _ensure_storage_dirs(self):
         """Crea automáticamente los directorios locales de almacenamiento si no existen."""
@@ -86,18 +94,46 @@ class ConfigManager:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     saved = json.load(f)
+                    self._en_claro = [k for k, v in saved.items()
+                                      if es_secreto(k) and isinstance(v, str) and v and not v.startswith(PREFIJO)]
                     merged = self._defaults.copy()
                     merged.update(saved)
+                    for k, v in list(merged.items()):
+                        if es_secreto(k) and isinstance(v, str) and v.startswith(PREFIJO):
+                            claro = descifrar(v, self.config_dir)
+                            if claro is None:
+                                logger.warning(f"No se pudo descifrar «{k}» (¿config copiada de otra cuenta o PC?): se deja vacía")
+                            merged[k] = claro or ""
                     return merged
             except Exception as e:
                 logger.error(f"Error leyendo {self.config_file}: {e}")
         
         merged = self._defaults.copy()
+        self._escribir(merged)
+        return merged
+
+    def _escribir(self, datos):
+        """Escribe config.json con las claves cifradas (solo tu usuario del sistema puede leerlas)."""
+        en_disco = {k: (cifrar(v, self.config_dir) if es_secreto(k) and isinstance(v, str) and v else v)
+                    for k, v in datos.items()}
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(merged, f, indent=4, ensure_ascii=False)
-        except Exception: pass
-        return merged
+                json.dump(en_disco, f, indent=4, ensure_ascii=False)
+            if os.name != 'nt':
+                os.chmod(self.config_file, 0o600)
+        except Exception as e:
+            logger.error(f"Error guardando {self.config_file}: {e}")
+
+    def estado_cifrado(self):
+        """Cuántas claves hay en config.json y si todas están cifradas."""
+        try:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                guardado = json.load(f)
+        except Exception:
+            guardado = {}
+        claves = {k: v for k, v in guardado.items() if es_secreto(k) and isinstance(v, str) and v}
+        cifradas = sum(1 for v in claves.values() if v.startswith(PREFIJO))
+        return {"metodo": metodo(), "cifradas": cifradas, "en_claro": len(claves) - cifradas, "archivo": self.config_file}
 
     def save_config(self, new_data=None):
         if new_data:
@@ -106,11 +142,8 @@ class ConfigManager:
             try:
                 os.makedirs(self.config_dir, exist_ok=True)
             except Exception: pass
-        try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error guardando {self.config_file}: {e}")
+        self._escribir(self.data)
+        self._en_claro = []
         self._ensure_storage_dirs()
 
     def get(self, key, default=None):

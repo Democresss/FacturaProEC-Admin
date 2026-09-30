@@ -565,6 +565,12 @@ def sri_ruc(payload: RucPayload):
 
 
 # ───────────────────────────── endpoints: security ────────────────
+@app.get("/api/security/cifrado")
+def security_cifrado():
+    """Claves guardadas en config.json: cuántas y si están cifradas (DPAPI en Windows, llave 600 en Linux)."""
+    return {"ok": True, **_config.estado_cifrado()}
+
+
 @app.get("/api/security/status")
 def security_status():
     return {

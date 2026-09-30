@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Card } from '../components/Card';
 import { AsyncButton } from '../components/Button';
+import { CifradoCard } from '../components/CifradoCard';
 
 export function SecurityView({ call, toast }: {
   call: (path: string, opts?: RequestInit) => Promise<any>;
@@ -78,6 +79,7 @@ export function SecurityView({ call, toast }: {
 
   return (
     <div>
+      <div style={{ marginBottom: 16 }}><CifradoCard call={call} /></div>
       <div className="grid-2" style={{ marginBottom: 16 }}>
         <Card title="Estado del escudo" icon={<span>🛡</span>}>
           <div className="row between mb-16">

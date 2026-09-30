@@ -100,11 +100,9 @@ export function DashboardView({ call, goto }: {
 
         <Card title="Atajos" sub="Accesos rápidos a los módulos" icon={<span>⚡</span>}>
           <div className="grid-2 gap-8">
-            <button className="btn" onClick={() => goto('db')}>🗄 Ver Base de Datos</button>
-            <button className="btn" onClick={() => goto('sri')}>🧾 Sincronizar SRI</button>
-            <button className="btn" onClick={() => goto('security')}>🛡 Ver Seguridad</button>
+            <button className="btn" onClick={() => goto('servidor')}>🛰 Servidor y túnel</button>
+            <button className="btn" onClick={() => goto('security')}>🛡 Seguridad y cifrado</button>
             <button className="btn" onClick={() => goto('storage')}>💾 Almacenamiento</button>
-            <button className="btn" onClick={() => goto('vpn')}>🔒 VPN</button>
             <button className="btn" onClick={() => goto('config')}>⚙ Configuración</button>
           </div>
         </Card>

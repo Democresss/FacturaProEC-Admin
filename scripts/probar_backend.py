@@ -74,6 +74,8 @@ def main():
         datos = json.loads(cuerpo) if st == 200 else {}
         c(st == 200 and datos.get("ok") and "docker" in (datos.get("data") or {}), "«Servidor y túnel» revisa el equipo",
           (datos.get("data") or {}).get("docker") if st == 200 else cuerpo[:120])
+        st, _, cuerpo = pedir(base + "/api/security/cifrado", clave)
+        c(st == 200 and json.loads(cuerpo).get("en_claro") == 0, "Seguridad: las claves guardadas están cifradas", cuerpo[:120])
         st, _, cuerpo = pedir(base + "/api/servidor/progreso", clave)
         c(st == 200 and json.loads(cuerpo).get("ok"), "«Servidor y túnel»: progreso")
     finally:
