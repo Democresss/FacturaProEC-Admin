@@ -4,7 +4,23 @@ Todo el flujo de control de versiones + empaquetado + auto-update está automati
 
 ---
 
-## TL;DR — lanzar una nueva versión
+## Desde la 2.2.0: GitHub compila Windows y Linux
+
+```bash
+npm run sync             # si cambiaste ../desktop_app o FacPro Servidor
+npm run release:minor    # o :patch / :major, o `npm run release` sin subir versión
+```
+
+1. Sube la versión, comprueba que compila, crea el tag `vX.Y.Z` y lo sube.
+2. GitHub (`.github/workflows/compilar.yml`) compila el backend (sin Python en el equipo) y la app:
+   - **Windows 10/11**: `FacturaProEC-Admin-X.Y.Z-win-x64.exe` (se actualiza sola).
+   - **Linux**: `.AppImage` (cualquier distro, se actualiza sola), `.deb` (Ubuntu/Mint/Debian), `.rpm` (Fedora/openSUSE), `.tar.gz`.
+3. Todo queda en un **borrador** en Releases. **Nadie recibe la actualización** hasta pulsar «Publish release».
+
+Prueba sin publicar nada: `git push origin HEAD:compilar-prueba` (compila y sube al borrador de la versión actual).
+El resultado queda en la rama `estado-compilacion` (estado.json). Flujo anterior (solo Windows, desde tu PC): `npm run release:patch -- --local`.
+
+## TL;DR — lanzar una nueva versión (flujo anterior, `--local`)
 
 ```bash
 cd C:\Users\jloor\Proyectos\FacturaProEC\admin-electron

@@ -302,6 +302,37 @@ function printManualReleaseInstructions(version, repo) {
 /* ─── MAIN ─── */
 const arg = process.argv[2];
 const kind = ['patch','minor','major'].includes(arg) ? arg : null;
+const LOCAL = process.argv.includes('--local');
+
+/* Por defecto: GitHub compila Windows 10/11 y Linux (.github/workflows/compilar.yml) y deja un BORRADOR.
+ * Aquí solo se sube la versión, se comprueba que compila y se sube el tag. Nadie recibe la
+ * actualización hasta pulsar «Publish release» en GitHub. `--local` = flujo anterior (solo Windows, desde esta PC). */
+if (!LOCAL) {
+  try {
+    log(`Release por GitHub ${kind ? ('(' + kind + ')') : '(sin bump)'}`);
+    const { cur, next, bumped } = bumpVersion(kind);
+    log(`Versión: ${cur} → ${next}`);
+    build();
+    const committed = gitCommitAndTag(next, bumped);
+    const tagOk = spawnSync('git', ['rev-parse', `v${next}`], { cwd: ROOT }).status === 0;
+    if (!committed && !tagOk) {
+      spawnSync('git', ['tag', `v${next}`], { cwd: ROOT, stdio: 'inherit' });
+    }
+    log('Subiendo código y tag a GitHub…');
+    const r = spawnSync('git', ['push', 'origin', 'main', '--tags'], { cwd: ROOT, stdio: 'inherit' });
+    if (r.status !== 0) throw new Error('git push falló');
+    const repo = readRepoSlug();
+    ok(`GitHub está compilando v${next} para Windows y Linux (tarda ~15 min):`);
+    console.log(`   https://github.com/${repo}/actions`);
+    ok('Cuando termine, revisa el BORRADOR y pulsa «Publish release»:');
+    console.log(`   https://github.com/${repo}/releases`);
+    console.log('   Hasta que lo publiques, nadie recibe la actualización.');
+  } catch (e) {
+    err(e.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
 
 try {
   log(`Vamos a release ${kind ? ('(' + kind + ')') : '(sin bump)'}`);

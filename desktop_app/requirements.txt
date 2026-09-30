@@ -1,0 +1,21 @@
+# Requisitos del FacturaProEC AdminPanel (.exe de administración).
+# Estos son los paquetes externos que el código de `desktop_app/` importa.
+# `requirements.txt` raíz y `FacProV2/requirements.txt` corresponden al
+# backend FastAPI/web; este archivo es sólo para el desktop_app.
+
+customtkinter==6.0.0
+# Pillow: ya lo trae customtkinter indirectamente, pero lo fijamos porque
+# el system_tray y el icon_asset lo usan directamente.
+Pillow==12.3.0
+# System tray cross-platform (Win + Linux AppIndicator / X fallback).
+pystray>=0.19
+# SFTP real (reemplaza el test puramente TCP del StorageManager original).
+paramiko>=3.0
+# DB Viewer + SRIFacade (async):
+SQLAlchemy==2.0.51
+asyncpg==0.31.0
+aiosqlite==0.22.1
+# Catastro RUC del SRI (REST público, sin auth) — usa `requests`.
+requests>=2.31
+# PyInstaller se usa sólo para compilar; dejado aquí por repetibilidad del build.
+pyinstaller>=6.5

@@ -15,6 +15,7 @@ import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -25,6 +26,24 @@ let isQuitting = false;
 const isDev = !app.isPackaged;
 const ROOT = app.getAppPath();
 const RESOURCES = process.resourcesPath || ROOT;
+
+// Clave que solo conocen este proceso, el backend y la ventana: sin ella el backend responde 401.
+// Antes cualquier página web abierta en el navegador podía usar el backend en 127.0.0.1.
+const BRIDGE_TOKEN = crypto.randomBytes(24).toString('hex');
+
+// AppImage en Ubuntu 24.04+ / distros con AppArmor estricto: el sandbox de Chromium no arranca sin
+// permisos especiales y la app se cerraba al abrir. El .deb y el .rpm instalan el sandbox bien.
+if (process.platform === 'linux' && process.env.APPIMAGE) {
+  app.commandLine.appendSwitch('no-sandbox');
+}
+
+// Una sola instancia: si el icono de bandeja no se ve (algunos escritorios de Linux), volver a abrir
+// la app muestra la ventana en vez de arrancar otra copia escondida.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showMainWindow());
+}
 
 /* ───────────── Backend Python (bridge FastAPI) ───────────── */
 
@@ -46,6 +65,20 @@ function resolveBridgeScript(): string {
   return candidates[0];
 }
 
+/**
+ * Backend compilado (PyInstaller): un solo ejecutable con Python y todas sus librerías adentro.
+ * Es lo que hace que la app funcione en cualquier Linux y en Windows 10/11 sin instalar nada.
+ */
+function resolveFrozenBridge(): string | null {
+  const exe = process.platform === 'win32' ? 'facpro-bridge.exe' : 'facpro-bridge';
+  const candidates = [
+    path.join(RESOURCES, 'bridge', exe),           // app instalada
+    path.join(ROOT, 'dist-bridge', exe),           // dev, tras compilarlo
+  ];
+  if (process.env.FACTURAPRO_PYTHON) return null;  // override explícito para desarrollo
+  return candidates.find(c => fs.existsSync(c)) || null;
+}
+
 function resolvePython(): string {
   // 1. Variable de entorno explícita (override manual para dev/testing).
   if (process.env.FACTURAPRO_PYTHON) return process.env.FACTURAPRO_PYTHON;
@@ -63,23 +96,28 @@ function resolvePython(): string {
     }
   }
   // 3. Fallback: python del sistema (útil en dev sin haber descargado el runtime).
+  //    En Linux el comando es python3 (en Ubuntu/Mint/Debian «python» no existe).
   console.log('[main] Usando python del sistema (no existe runtime embebido)');
-  return 'python';
+  return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 function startBridge(): Promise<number> {
   return new Promise((resolve, reject) => {
+    const frozen = resolveFrozenBridge();
     const script = resolveBridgeScript();
-    const pyExe = resolvePython();
-    console.log(`[main] Lanzando bridge: ${pyExe} ${script}`);
+    const pyExe = frozen || resolvePython();
+    const args = frozen ? [] : [script];
+    console.log(`[main] Lanzando bridge: ${pyExe} ${args.join(' ')}`);
 
-    bridgeProcess = spawn(pyExe, [script], {
+    bridgeProcess = spawn(pyExe, args, {
       // El cwd DEBE existir físicamente en el FS. Si el script está dentro del
       // asar (path virtual), fallback a RESOURCES/python-backend (real).
-      cwd: fs.existsSync(path.dirname(script)) ? path.dirname(script)
+      cwd: frozen ? path.dirname(frozen)
+        : fs.existsSync(path.dirname(script)) ? path.dirname(script)
         : (fs.existsSync(path.join(RESOURCES, 'python-backend')) ? path.join(RESOURCES, 'python-backend')
         : process.resourcesPath || undefined),
-      env: { ...process.env, BRIDGE_PORT: '0', PYTHONUNBUFFERED: '1', RESOURCES_PATH: String(RESOURCES) },
+      env: { ...process.env, BRIDGE_PORT: '0', PYTHONUNBUFFERED: '1', RESOURCES_PATH: String(RESOURCES),
+             BRIDGE_TOKEN },
       windowsHide: true,
     });
 
@@ -185,7 +223,8 @@ function createWindow() {
   }
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    // Al arrancar con la sesión (--hidden) queda en la bandeja; volver a abrir la app la muestra.
+    if (!process.argv.includes('--hidden')) mainWindow?.show();
   });
 
   // Minimizar a bandeja en vez de salir
@@ -295,11 +334,43 @@ function showNotification(title: string, body: string) {
   } catch { /* noop */ }
 }
 
+/* ───────────── Arranque automático ─────────────
+ * Antes lo hacía el backend Python: en Windows registraba su propio ejecutable (python / backend), no la
+ * app, y en Linux no hacía nada aunque decía que sí. Ahora lo hace Electron con la app real. */
+function setAutostart(enable: boolean): { ok: boolean; message: string } {
+  try {
+    if (process.platform === 'linux') {
+      const dir = path.join(app.getPath('home'), '.config', 'autostart');
+      const file = path.join(dir, 'facturaproec-admin.desktop');
+      if (enable) {
+        fs.mkdirSync(dir, { recursive: true });
+        const exec = process.env.APPIMAGE || process.execPath;
+        fs.writeFileSync(file, ['[Desktop Entry]', 'Type=Application', 'Name=FacturaProEC Admin',
+          `Exec="${exec}" --hidden`, 'Terminal=false', 'X-GNOME-Autostart-enabled=true', ''].join('\n'));
+      } else if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+      }
+    } else {
+      app.setLoginItemSettings({ openAtLogin: enable, args: ['--hidden'] });
+      if (process.platform === 'win32') {
+        // Entrada vieja que dejaba el backend apuntando a Python: se quita.
+        spawn('reg', ['delete', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v',
+                      'FacturaProECStorageManager', '/f'], { windowsHide: true }).on('error', () => {});
+      }
+    }
+    return { ok: true, message: enable ? 'FacturaProEC Admin arrancará al iniciar sesión (en la bandeja)'
+                                       : 'Arranque automático desactivado' };
+  } catch (e: any) {
+    return { ok: false, message: String(e?.message || e) };
+  }
+}
+
 /* ───────────── IPC handlers ───────────── */
 
 function setupIpc() {
   ipcMain.handle('bridge:get-port', () => bridgePort);
   ipcMain.handle('bridge:get-url', () => bridgePort ? `http://127.0.0.1:${bridgePort}` : null);
+  ipcMain.handle('bridge:get-token', () => BRIDGE_TOKEN);
 
   ipcMain.handle('theme:set', (_e, mode: 'system'|'light'|'dark') => {
     setTheme(mode);
@@ -315,6 +386,7 @@ function setupIpc() {
   });
 
   ipcMain.handle('app:quit', () => quitApp());
+  ipcMain.handle('autostart:set', (_e, enable: boolean) => setAutostart(!!enable));
 
   ipcMain.handle('notify', (_e, title: string, body: string) => {
     showNotification(title, body);

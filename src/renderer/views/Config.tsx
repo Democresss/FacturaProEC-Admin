@@ -34,7 +34,10 @@ export function ConfigView({ call, toast, theme }: ConfigViewProps) {
 
   const saveAutostart = async (on: boolean) => {
     setAutostart(on);
-    const r = await call('/api/autostart', { method: 'POST', body: JSON.stringify({ enable: on }) });
+    // Electron registra la app real (Windows) o crea el acceso de inicio de sesión (Linux)
+    const ea = (window as any).electronAPI;
+    const r = ea?.autostart ? await ea.autostart.set(on)
+                            : await call('/api/autostart', { method: 'POST', body: JSON.stringify({ enable: on }) });
     await call('/api/config', { method: 'POST', body: JSON.stringify({ data: { autostart: on } }) });
     toast('Auto-arranque', r.message || (on ? 'Activado' : 'Desactivado'), r.ok ? 'success' : 'warning');
   };

@@ -11,8 +11,9 @@ import { SecurityView } from './views/Security';
 import { StorageView } from './views/Storage';
 import { VpnView } from './views/Vpn';
 import { ConfigView } from './views/Config';
+import { ServidorView } from './views/Servidor';
 
-type TabId = 'dashboard' | 'db' | 'sri' | 'security' | 'storage' | 'vpn' | 'config';
+type TabId = 'dashboard' | 'db' | 'sri' | 'security' | 'storage' | 'servidor' | 'vpn' | 'config';
 
 interface TabDef {
   id: TabId;
@@ -27,6 +28,7 @@ const TABS: TabDef[] = [
   { id: 'sri',       label: 'SRI / Recepción', icon: '🧾', desc: 'IMAP + RUC' },
   { id: 'security',  label: 'Seguridad',    icon: '🛡', desc: 'Guardian anti-intrusión' },
   { id: 'storage',   label: 'Almacenamiento', icon: '💾', desc: 'SFTP / FTP / Docker' },
+  { id: 'servidor',  label: 'Servidor y túnel', icon: '🛰', desc: 'Tu base lista para FacturaPro por internet (bore)' },
   { id: 'vpn',       label: 'VPN',          icon: '🔒', desc: 'PG remoto + túneles' },
   { id: 'config',    label: 'Configuración', icon: '⚙', desc: 'Tema, autostart, etc.' },
 ];
@@ -125,6 +127,7 @@ function AppInner() {
           {activeTab === 'sri' && <SriView call={call} toast={toast} />}
           {activeTab === 'security' && <SecurityView call={call} toast={toast} />}
           {activeTab === 'storage' && <StorageView call={call} toast={toast} />}
+          {activeTab === 'servidor' && <ServidorView call={call} toast={toast} />}
           {activeTab === 'vpn' && <VpnView call={call} toast={toast} />}
           {activeTab === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
         </main>

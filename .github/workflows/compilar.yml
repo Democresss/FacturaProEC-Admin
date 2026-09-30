@@ -1,0 +1,134 @@
+# FacturaProEC Admin: compila para Windows 10/11 (instalador NSIS x64) y Linux (AppImage para cualquier distro,
+# .deb para Ubuntu/Mint/Debian, .rpm para Fedora/openSUSE y .tar.gz) con el backend ya compilado adentro
+# (no hace falta instalar Python en el equipo) y lo sube a un BORRADOR del release vX.Y.Z.
+#
+# Nada llega a los usuarios hasta que alguien pulse «Publish release» en GitHub → Releases.
+# Se ejecuta con un tag vX.Y.Z (npm run release), con un push a la rama «compilar-prueba» o a mano (Actions).
+name: Compilar (Windows y Linux)
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["compilar-prueba"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: compilar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-linux:
+    runs-on: ubuntu-latest
+    # Debian 11 (glibc 2.31): el backend funciona en Ubuntu/Mint 20+, Debian 11+, Fedora y demás
+    container: python:3.11-bullseye
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --no-cache-dir -r python-backend/requirements.txt customtkinter "pyinstaller==6.*"
+      - run: python scripts/build_bridge.py
+      - run: python scripts/probar_backend.py dist-bridge/facpro-bridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-linux
+          path: dist-bridge/facpro-bridge
+
+  backend-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r python-backend/requirements.txt customtkinter "pyinstaller==6.*"
+      - run: python scripts/build_bridge.py
+      - run: python scripts/probar_backend.py dist-bridge/facpro-bridge.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-windows
+          path: dist-bridge/facpro-bridge.exe
+
+  borrador:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Crear el borrador del release (si no existe)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          EXISTE=$(gh release list --limit 50 --json tagName --jq ".[] | select(.tagName==\"v$V\") | .tagName")
+          if [ -z "$EXISTE" ]; then
+            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "FacturaProEC Admin v$V" \
+              --notes "Windows 10/11: FacturaProEC-Admin-$V-win-x64.exe · Linux: .AppImage (cualquier distro), .deb (Ubuntu/Mint/Debian), .rpm (Fedora/openSUSE) o .tar.gz"
+          fi
+
+  app-linux:
+    needs: [backend-linux, borrador]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-linux
+          path: dist-bridge
+      - run: chmod +x dist-bridge/facpro-bridge
+      - run: sudo apt-get update && sudo apt-get install -y rpm
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: mkdir -p resources/python-runtime
+      - run: npx electron-builder --linux AppImage deb rpm tar.gz --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  app-windows:
+    needs: [backend-windows, borrador]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-windows
+          path: dist-bridge
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: New-Item -ItemType Directory -Force resources/python-runtime | Out-Null
+        shell: pwsh
+      - run: npx electron-builder --win nsis --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  estado:
+    needs: [backend-linux, backend-windows, app-linux, app-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dejar el resultado en la rama estado-compilacion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          ASSETS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" \
+            --jq "[.[] | select(.tag_name==\"v$V\") | .assets[] | {nombre: .name, mb: ((.size/1048576)|floor)}]" || echo "[]")
+          mkdir -p /tmp/estado
+          cat > /tmp/estado/estado.json <<EOF
+          {"version": "$V", "commit": "$GITHUB_SHA", "ref": "$GITHUB_REF_NAME", "run": "$GITHUB_RUN_ID",
+           "backend_linux": "${{ needs.backend-linux.result }}", "backend_windows": "${{ needs.backend-windows.result }}",
+           "app_linux": "${{ needs.app-linux.result }}", "app_windows": "${{ needs.app-windows.result }}",
+           "archivos": $ASSETS}
+          EOF
+          cd /tmp/estado
+          git init -q -b estado-compilacion
+          git config user.name "facpro-bot"
+          git config user.email "facpro-bot@users.noreply.github.com"
+          git add estado.json
+          git commit -q -m "estado de la compilación v$V ($GITHUB_REF_NAME)"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" estado-compilacion

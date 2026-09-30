@@ -48,3 +48,8 @@ nul
 .vscode/
 .idea/
 *.tsbuildinfo
+
+# Backend compilado (PyInstaller): lo genera scripts/build_bridge.py
+/dist-bridge/
+/build-bridge/
+build-bridge.log

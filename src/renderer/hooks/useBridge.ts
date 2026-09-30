@@ -20,6 +20,7 @@ export function useBridge() {
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const urlRef = useRef<string | null>(null);
+  const tokenRef = useRef<string>('');
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +43,7 @@ export function useBridge() {
           const url = await ea.bridge.getUrl();
           if (url) {
             if (cancelled) return;
+            tokenRef.current = (await ea.bridge.getToken?.()) || '';
             setBaseUrl(url);
             urlRef.current = url;
             setState('ready');
@@ -74,7 +76,8 @@ export function useBridge() {
     try {
       // Si NO hay body, asegurar method GET explícito
       const method = opts.method || (opts.body ? 'POST' : 'GET');
-      const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', ...((opts.headers as any) || {}) };
+      if (tokenRef.current) headers['X-Bridge-Token'] = tokenRef.current;
       const res = await fetch(`${base}${path}`, { ...opts, method, headers });
       if (!res.ok) {
         let text = '';

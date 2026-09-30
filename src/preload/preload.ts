@@ -10,6 +10,7 @@ const api = {
   bridge: {
     getPort: (): Promise<number | null> => ipcRenderer.invoke('bridge:get-port'),
     getUrl: (): Promise<string | null> => ipcRenderer.invoke('bridge:get-url'),
+    getToken: (): Promise<string> => ipcRenderer.invoke('bridge:get-token'),
   },
   theme: {
     set: (mode: 'system' | 'light' | 'dark') =>
@@ -26,6 +27,9 @@ const api = {
     quit: () => ipcRenderer.invoke('app:quit'),
   },
   notify: (title: string, body: string) => ipcRenderer.invoke('notify', title, body),
+  autostart: {
+    set: (enable: boolean) => ipcRenderer.invoke('autostart:set', enable) as Promise<{ ok: boolean; message: string }>,
+  },
   openExternal: (url: string) => ipcRenderer.invoke('shell:open', url),
   update: {
     check: () => ipcRenderer.invoke('update:check'),

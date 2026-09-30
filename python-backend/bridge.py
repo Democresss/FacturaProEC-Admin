@@ -30,6 +30,9 @@ from typing import Any, Optional
 #                     pero el código lo importa como "desktop_app" (con underscore).
 # Manejamos ambos nombres para que funcione en dev y en build.
 _HERE = Path(__file__).resolve().parent
+# El Python embebido de Windows (python._pth) no agrega la carpeta del script: se agrega aquí
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 _CANDIDATES = [
     _HERE.parent.parent / "desktop_app",                          # dev
     Path(__file__).resolve().parent.parent / "desktop_app",       # extraResources/python-backend/.. (underscore)
@@ -38,7 +41,7 @@ _CANDIDATES = [
     Path(os.environ.get("RESOURCES_PATH", "")) / "desktop_app",  # idem underscore
 ]
 for _c in _CANDIDATES:
-    if _c.exists() and str(_c) not in sys.path:
+    if _c.exists() and str(_c) not in sys.path and not getattr(sys, "frozen", False):
         sys.path.insert(0, str(_c))
         break
 
@@ -102,13 +105,32 @@ async def lifespan(app_: FastAPI):
 
 
 app = FastAPI(title="FacturaProEC Admin Bridge", version="2.0.0", lifespan=lifespan)
+# Antes: allow_origins=["*"] y sin clave. Cualquier página web abierta en el navegador podía encontrar el
+# puerto en 127.0.0.1 y usar el backend (consultas SQL a la base, firewall…). Ahora solo la ventana de la
+# app: su origen (file:// → "null", o el Vite de desarrollo) y la clave que el proceso main le pasa.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # sólo 127.0.0.1 local
-    allow_credentials=True,
+    allow_origins=["null", "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+_CLAVE_BRIDGE = os.environ.get("BRIDGE_TOKEN", "")
+
+
+@app.middleware("http")
+async def _exigir_clave(request, call_next):
+    import hmac
+    from fastapi.responses import JSONResponse
+    if _CLAVE_BRIDGE and request.method != "OPTIONS" and not hmac.compare_digest(
+            request.headers.get("x-bridge-token", ""), _CLAVE_BRIDGE):
+        return JSONResponse({"ok": False, "message": "No autorizado"}, status_code=401)
+    return await call_next(request)
+
+
+# Servidor y túnel (bore): lo mismo que FacPro Servidor, dentro de la app
+from servidor_api import router as _servidor_router  # noqa: E402
+app.include_router(_servidor_router)
 
 
 # ───────────────────────────── helpers ─────────────────────────────
@@ -631,6 +653,11 @@ def _csv_cell(v) -> str:
 
 # ───────────────────────────── entrypoint ──────────────────────────
 def main():
+    # El mismo ejecutable sirve de vigilante del túnel y para tareas de administrador (pkexec)
+    from servidor_api import modo_linea_de_comandos
+    codigo = modo_linea_de_comandos(sys.argv[1:])
+    if codigo is not None:
+        sys.exit(codigo)
     import uvicorn
     port = int(os.environ.get("BRIDGE_PORT", "0"))
     if port == 0:
