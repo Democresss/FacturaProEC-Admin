@@ -466,7 +466,10 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               if (r.ok) { setEnlace(''); analizar(pgElegido || undefined, minioElegido || undefined); }
             }}>Guardar</AsyncButton>
           </div>
-          {!vig.enlace && (
+          {vig.problema && (
+            <div className="fs-12" style={{ margin: '8px 0', color: 'var(--danger)' }}>⚠ {vig.problema}</div>
+          )}
+          {(!vig.enlace || vig.problema) && (
             <div className="fs-12" style={{ margin: '10px 0', padding: 10, borderRadius: 8, background: 'var(--warning-faint)' }}>
               <div className="fw-700" style={{ marginBottom: 4 }}>Cómo sacar el código de enlace (una sola vez)</div>
               <ol style={{ margin: '0 0 8px', paddingLeft: 18 }}>
@@ -484,7 +487,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             </div>
           )}
           <div className="fs-12" style={{ margin: '8px 0', color: vig.enlace && vig.instalado ? '#22c55e' : '#f59e0b' }}>
-            {vig.enlace ? `✓ Enlazado con ${vig.facturapro}` : 'Sin enlace: si cambia el puerto tendrás que cambiarlo a mano en FacturaPro'}
+            {vig.enlace ? (vig.problema ? `✖ Enlazado con ${vig.facturapro}, pero no se llega` : `✓ Enlazado con ${vig.facturapro}`) : 'Sin enlace: si cambia el puerto tendrás que cambiarlo a mano en FacturaPro'}
             {' · '}{vig.instalado ? 'vigilante instalado' : 'vigilante no instalado'}
             {vig.informado ? ` · último aviso ${vig.informado} (puerto ${vig.puerto_informado})` : ''}
           </div>

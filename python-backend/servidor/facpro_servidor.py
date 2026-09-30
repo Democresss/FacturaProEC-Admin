@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -868,6 +868,7 @@ def analizar(pg_elegido=None, minio_elegido=None):
     if config.get("bore_puerto_pg"):
         resultado["conexion"] = {"en_linea": sonda_ssl(BORE_HOST, config["bore_puerto_pg"], 6)}
     resultado["vigilante"] = {"enlace": bool(config.get("enlace_facturapro")), "facturapro": config.get("enlace_url") or "",
+                              "problema": problema_enlace(config.get("enlace_url")) if config.get("enlace_url") else "",
                               "informado": config.get("informado") or "", "puerto_informado": config.get("puerto_informado"),
                               "instalado": vigilante_instalado(), "corriendo": bool(vigilante_vivo())}
     return resultado
@@ -1301,8 +1302,33 @@ def _es_red_local(host):
     return ip.is_loopback or ip.is_private
 
 
+_AVISO = {"motivo": ""}
+
+
+def _es_bucle(host):
+    return (host or "").lower() in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def problema_enlace(url):
+    """Si la dirección de FacturaPro del código no se alcanza desde este equipo, por qué (texto); si llega, ""."""
+    p = urlparse(url or "")
+    if not p.hostname:
+        return ""
+    puerto = p.port or (443 if p.scheme == "https" else 80)
+    if puerto_abierto(p.hostname, puerto, 5):
+        return ""
+    if _es_bucle(p.hostname):
+        return ("El código se generó en un FacturaPro abierto como «%s»: desde este equipo esa dirección es él mismo y "
+                "ahí no hay FacturaPro. Abre FacturaPro con la IP de su equipo en tu red (por ejemplo "
+                "http://192.168.1.27:8001) o con su dirección pública, genera un código nuevo y pégalo aquí." % p.hostname)
+    return "No se llega a FacturaPro en %s:%s desde este equipo (¿apagado, sin red o un cortafuegos?)." % (p.hostname, puerto)
+
+
 def guardar_enlace(codigo):
     datos = leer_enlace(codigo)
+    _p = problema_enlace(datos["u"])
+    if _p and _es_bucle(urlparse(datos["u"]).hostname):
+        raise ValueError(_p)
     config = leer_config()
     config.update(enlace_facturapro=str(codigo).strip(), enlace_empresa=datos["o"], enlace_url=datos["u"])
     guardar_config(config)
@@ -1336,13 +1362,16 @@ def informar_direccion(puerto, config=None, host=None):
             motivo = json.loads(e.read().decode("utf-8") or "{}").get("error") or e.reason
         except Exception:
             motivo = e.reason
-        evento("FacturaPro no aceptó la dirección nueva: %s" % motivo, "error")
+        _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % motivo
+        evento(_AVISO["motivo"], "error")
         return False
     except Exception as e:  # noqa: BLE001 - sin internet, DNS…
-        log("No se pudo avisar a FacturaPro (%s). Se reintentará." % e, "aviso")
+        _AVISO["motivo"] = problema_enlace(datos["u"]) or "No se pudo avisar a FacturaPro (%s). Se reintentará." % e
+        log(_AVISO["motivo"], "aviso")
         return False
     if not respuesta.get("success"):
-        evento("FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error"), "error")
+        _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error")
+        evento(_AVISO["motivo"], "error")
         return False
     config = leer_config()
     config.update(puerto_informado=int(puerto), informado=time.strftime("%Y-%m-%d %H:%M"))
@@ -3046,8 +3075,9 @@ def _avisar_ahora():
     if not leer_config().get("enlace_facturapro"):
         raise RuntimeError("Falta el código de enlace de FacturaPro (los pasos están en «Que se arregle solo»). "
                            "Mientras tanto, pon a mano en FacturaPro la dirección %s:%s." % (BORE_HOST, puerto))
+    _AVISO["motivo"] = ""
     if not informar_direccion(puerto):
-        raise RuntimeError("FacturaPro no aceptó el aviso: mira el Registro (abajo) para ver el motivo.")
+        raise RuntimeError(_AVISO["motivo"] or "No se pudo avisar a FacturaPro: mira el Registro (abajo).")
     return True
 
 
