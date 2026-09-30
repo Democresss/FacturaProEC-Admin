@@ -158,7 +158,7 @@ export function UpdateModal() {
             Al reiniciar, se aplicará automáticamente.
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            El túnel sigue en línea mientras se actualiza (corre en Docker, no dentro de la app).
+            Con «Más tarde» se instala sola cuando la app quede en la bandeja. El túnel sigue en línea mientras tanto (corre en Docker).
           </div>
           {novedades}
         </div>

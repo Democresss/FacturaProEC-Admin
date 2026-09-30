@@ -1,14 +1,12 @@
 !macro customInit
-  ; Cerrar la app si está abierta antes de instalar encima.
-  ; Si el usuario instaló una versión vieja y está corriendo, esto fuerza
-  ; el cierre para que los archivos (app.asar, python-runtime, etc.) se
-  ; puedan sobrescribir sin "El proceso no tiene acceso al archivo".
-  DetailPrint "Cerrando FacturaProEC Admin si está abierta…"
-  ; Intento 1: por nombre de proceso ( productName → "FacturaProEC Admin.exe")
-  nsExec::ExecToLog 'taskkill /F /IM "FacturaProEC Admin.exe" /T'
+  ; Cerrar la app y su backend si están abiertos antes de instalar encima (archivos en uso).
+  ; SIN «/T»: al actualizar, este instalador lo lanza la propia app y /T (todo el árbol de procesos) podía
+  ; matar al instalador mismo; la actualización quedaba descargada y nunca se aplicaba.
+  ; No se toca facpro-vigilante.exe (el vigilante corre desde la carpeta del usuario, no desde aquí).
+  DetailPrint "Cerrando FacPro Server Manager si está abierta…"
+  nsExec::ExecToLog 'taskkill /F /IM "FacturaProEC Admin.exe"'
   Pop $0
-  ; Intento 2: nombre alternativo ( package.json "name" )
-  nsExec::ExecToLog 'taskkill /F /IM "facturaproec-admin.exe" /T'
+  nsExec::ExecToLog 'taskkill /F /IM "facpro-bridge.exe"'
   Pop $0
   ; Breve pausa para que libere los handles de archivos antes de copiar
   Sleep 800

@@ -22,7 +22,19 @@ let tray: Tray | null = null;
 let bridgeProcess: ChildProcess | null = null;
 let bridgePort: number | null = null;
 let isQuitting = false;
-let avisoBandeja = false;
+let actualizacionLista = false;   // descargada: se instala en cuanto la app quede en segundo plano
+let descargando = false;
+
+// Tras instalar una actualización en segundo plano la app vuelve a abrirse igual: escondida en la bandeja.
+const MARCA_OCULTA = () => path.join(app.getPath('userData'), 'arrancar-oculta');
+function arrancarOculta(): boolean {
+  if (process.argv.includes('--hidden')) return true;
+  try {
+    if (fs.existsSync(MARCA_OCULTA())) { fs.unlinkSync(MARCA_OCULTA()); return true; }
+  } catch { /* noop */ }
+  return false;
+}
+const OCULTA_AL_ARRANCAR = arrancarOculta();
 
 // Nombre visible. El nombre interno (productName «FacturaProEC Admin») no cambia: de él dependen la carpeta de
 // instalación, los datos guardados y las actualizaciones automáticas.
@@ -228,8 +240,8 @@ function createWindow() {
   }
 
   mainWindow.once('ready-to-show', () => {
-    // Al arrancar con la sesión (--hidden) queda en la bandeja; volver a abrir la app la muestra.
-    if (!process.argv.includes('--hidden')) mainWindow?.show();
+    // Al arrancar con la sesión (--hidden) o tras actualizarse sola, queda en la bandeja; volver a abrir la app la muestra.
+    if (!OCULTA_AL_ARRANCAR) mainWindow?.show();
   });
 
   // Minimizar a bandeja en vez de salir
@@ -237,10 +249,8 @@ function createWindow() {
     if (!isQuitting) {
       e.preventDefault();
       mainWindow?.hide();
-      if (!avisoBandeja) {
-        avisoBandeja = true;
-        showNotification(NOMBRE, 'Sigue trabajando en segundo plano (icono de la bandeja): vigila el túnel.');
-      }
+      avisoBandejaUnaVez();
+      if (actualizacionLista) setTimeout(instalarSiEstaOculta, 15000);
     }
   });
 
@@ -332,7 +342,19 @@ nativeTheme.on('updated', () => {
   mainWindow?.webContents.send('theme:system-changed', { effective });
 });
 
-/* ───────────── Notifications ───────────── */
+/* ───────────── Notifications ─────────────
+ * Solo UNA notificación de Windows en toda la vida de la app: la primera vez que se cierra la ventana, para
+ * explicar que sigue en la bandeja. Antes salía cada vez que se cerraba, más la de «actualización lista» en
+ * cada arranque (checkForUpdatesAndNotify): cansaba. */
+
+function avisoBandejaUnaVez() {
+  const marca = path.join(app.getPath('userData'), 'aviso-bandeja-visto');
+  try {
+    if (fs.existsSync(marca)) return;
+    fs.writeFileSync(marca, new Date().toISOString());
+  } catch { return; }
+  showNotification(NOMBRE, 'Sigue trabajando en segundo plano (icono de la bandeja): vigila el túnel.');
+}
 
 function showNotification(title: string, body: string) {
   try {
@@ -454,11 +476,32 @@ function setupIpc() {
  * El repo de GitHub se configura en package.json → build.publish
  * (github provider). electron-updater lo lee automáticamente.
  *
- * Flujo: al arrancar la app empaquetada, `checkForUpdatesAndNotify()`
- * consulta la última release del repo, baja el .exe si hay versión
- * nueva, y al cerrar la app la instala. En dev (sin empaquetar) no
- * hace nada (autoUpdater no tiene channel).
+ * Flujo: al arrancar y cada 4 horas, `checkForUpdates()` (sin notificación de Windows) consulta la última
+ * release del repo y baja el instalador si hay versión nueva. La app casi nunca «se cierra» (vive en la bandeja),
+ * así que esperar a que el usuario salga dejaba la actualización sin instalar para siempre. Ahora:
+ *   - ventana abierta → el aviso ofrece «Reiniciar y actualizar» o «Más tarde»;
+ *   - app en la bandeja (o al esconderla) → se instala sola en silencio y vuelve a quedar en la bandeja.
+ * En Linux .deb/.rpm instalar pide la clave del sistema: ahí se instala al salir (o con el botón).
+ * En dev (sin empaquetar) no hace nada.
  */
+
+function instalacionSilenciosa(): boolean {
+  return process.platform === 'win32' || (process.platform === 'linux' && !!process.env.APPIMAGE);
+}
+
+function instalarSiEstaOculta() {
+  if (!actualizacionLista || !instalacionSilenciosa()) return;
+  if (mainWindow && mainWindow.isVisible()) return;
+  console.log('[update] instalando en segundo plano…');
+  try { fs.writeFileSync(MARCA_OCULTA(), '1'); } catch { /* noop */ }
+  isQuitting = true;
+  stopBridge();
+  autoUpdater.quitAndInstall(true, true);
+}
+
+function buscarActualizacion() {
+  autoUpdater.checkForUpdates().catch((e: any) => console.warn('[update] no se pudo revisar:', e?.message || e));
+}
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
@@ -470,6 +513,7 @@ function setupAutoUpdater() {
   });
   autoUpdater.on('update-available', (info: any) => {
     console.log(`[update] Disponible v${info.version} — descargando…`);
+    descargando = true;
     mainWindow?.webContents.send('update:status', { state: 'available', version: info.version, notas: notasDe(info) });
     // No usamos Notification del SO para updates: el renderer muestra un modal
     // con barra de progreso dentro de la app. Solo avisamos por SO si la app
@@ -486,14 +530,18 @@ function setupAutoUpdater() {
   autoUpdater.on('update-downloaded', (info: any) => {
     console.log(`[update] v${info.version} descargada — reiniciar para instalar.`);
     mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version, notas: notasDe(info) });
-    // Si la ventana está oculta (minimizada a bandeja), avisar por SO una sola vez.
-    if (!mainWindow || !mainWindow.isVisible()) {
-      showNotification('Actualización lista', `Reinicia para instalar v${info.version}.`);
-    }
+    descargando = false;
+    actualizacionLista = true;
+    // En la bandeja: se instala sola en silencio (sin notificación de Windows).
+    setTimeout(instalarSiEstaOculta, 5000);
   });
   autoUpdater.on('error', (err: Error) => {
     console.warn('[update] error:', err?.message || err);
-    mainWindow?.webContents.send('update:status', { state: 'error', message: String(err?.message || err) });
+    // Sin internet al revisar: nada que mostrar (se reintenta en 4 horas). Solo si falló una descarga en curso.
+    if (descargando) {
+      descargando = false;
+      mainWindow?.webContents.send('update:status', { state: 'error', message: String(err?.message || err) });
+    }
   });
 }
 
@@ -515,13 +563,8 @@ app.whenReady().then(async () => {
 
   // Comprobar actualizaciones (solo en app empaquetada; en dev no hace nada)
   if (app.isPackaged) {
-    setTimeout(() => {
-      try {
-        autoUpdater.checkForUpdatesAndNotify();
-      } catch (e) {
-        console.warn('[update] checkForUpdates falló:', e);
-      }
-    }, 5000);
+    setTimeout(buscarActualizacion, 5000);
+    setInterval(buscarActualizacion, 4 * 60 * 60 * 1000);
   }
 });
 
