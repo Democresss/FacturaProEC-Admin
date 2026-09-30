@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1254,10 +1254,16 @@ def configurar(opciones):
         os.chmod(os.path.join(carpeta_datos(), "conexion.txt"), 0o600)
     _devolver_dueno(os.path.join(carpeta_datos(), "conexion.txt"))
     log("Todo listo. Configuración guardada en %s" % ruta, "ok")
+    enviada = None
     if nuevo.get("enlace_facturapro"):
-        informar_direccion(puerto_pg, nuevo)
+        # con el código de enlace, FacturaPro recibe la conexión completa: no hay que pegar nada
+        enviada = informar_conexion(url, nuevo)
+        if enviada is None:
+            informar_direccion(puerto_pg, nuevo)
+    else:
+        log("Sin código de enlace: copia la dirección de abajo en FacturaPro (o guarda el código y vuelve a «Configurar todo»).", "aviso")
     return {"url": url, "ssl": en_linea is True, "puerto": puerto_pg, "base": base, "usuario": usuario, "minio": minio or None,
-            "facturapro": URL_FACTURAPRO}
+            "facturapro": URL_FACTURAPRO, "enviada": bool(enviada)}
 
 
 # ─────────────────────────────── enlace con FacturaPro y vigilante del túnel ───────────────────────────────
@@ -1333,7 +1339,59 @@ def guardar_enlace(codigo):
     config.update(enlace_facturapro=str(codigo).strip(), enlace_empresa=datos["o"], enlace_url=datos["u"])
     guardar_config(config)
     log("Enlace con FacturaPro guardado (%s)" % datos["u"], "ok")
-    return {"ok": True, "facturapro": datos["u"]}
+    r = {"ok": True, "facturapro": datos["u"]}
+    if not leer_config().get("conexion_informada"):
+        r = dict(r, siguiente="Ahora pulsa «Configurar todo»: la app manda la conexión completa a FacturaPro (no pegas nada).")
+    return r
+
+
+def informar_conexion(url, config=None):
+    """Manda a FacturaPro la conexión COMPLETA (usuario propio, clave y dirección del túnel) con el código de enlace:
+    nadie la copia ni la pega. True = FacturaPro la guardó; False = la rechazó o no se llegó; None = ese FacturaPro
+    todavía no tiene esta opción (versión anterior): entonces solo se avisa el puerto."""
+    import urllib.error
+    import urllib.request
+    config = config if config is not None else leer_config()
+    codigo = config.get("enlace_facturapro") or ""
+    if not codigo:
+        return False
+    try:
+        datos = leer_enlace(codigo)
+    except ValueError as e:
+        _AVISO["motivo"] = str(e)
+        return False
+    cuerpo = json.dumps({"codigo": codigo, "url": url}).encode("utf-8")
+    peticion = urllib.request.Request(datos["u"].rstrip("/") + "/v2/servidor-empresa/conexion", data=cuerpo, method="POST",
+                                      headers={"Content-Type": "application/json", "User-Agent": "FacProServidor/" + VERSION})
+    try:
+        with urllib.request.urlopen(peticion, timeout=60) as r:
+            respuesta = json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 405):
+            return None
+        try:
+            motivo = json.loads(e.read().decode("utf-8") or "{}").get("error") or e.reason
+        except Exception:
+            motivo = e.reason
+        _AVISO["motivo"] = "FacturaPro no aceptó la conexión: %s" % motivo
+        evento(_AVISO["motivo"], "error")
+        return False
+    except Exception as e:  # noqa: BLE001
+        _AVISO["motivo"] = problema_enlace(datos["u"]) or "No se pudo mandar la conexión a FacturaPro (%s)." % e
+        log(_AVISO["motivo"], "aviso")
+        return False
+    if not respuesta.get("success"):
+        _AVISO["motivo"] = "FacturaPro no aceptó la conexión: %s" % respuesta.get("error")
+        evento(_AVISO["motivo"], "error")
+        return False
+    config = leer_config()
+    puerto = urlparse(url.replace("postgresql+asyncpg://", "postgresql://")).port
+    config.update(conexion_informada=time.strftime("%Y-%m-%d %H:%M"), puerto_informado=puerto,
+                  informado=time.strftime("%Y-%m-%d %H:%M"))
+    guardar_config(config)
+    evento("FacturaPro ya usa la conexión nueva (%s)%s." % (respuesta.get("direccion") or "",
+                                                          ", sin cambios" if respuesta.get("sin_cambios") else ""), "ok")
+    return True
 
 
 def informar_direccion(puerto, config=None, host=None):

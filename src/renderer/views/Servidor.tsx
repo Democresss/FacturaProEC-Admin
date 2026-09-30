@@ -105,7 +105,11 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         const nombre = tarea;
         setTarea('');
         if (r.error) toast('No se pudo terminar', r.error, 'danger');
-        else if (nombre === 'configurar' && r.resultado) { setResultado(r.resultado); toast('¡Listo!', 'Tu base está en línea', 'success'); }
+        else if (nombre === 'configurar' && r.resultado) {
+          setResultado(r.resultado);
+          toast('¡Listo!', r.resultado.enviada ? 'Tu base está en línea y FacturaPro ya tiene la conexión (no pegas nada)'
+                                             : 'Tu base está en línea', 'success');
+        }
         analizar(pgElegido || undefined, minioElegido || undefined);
         cargarServicios();
       }
@@ -446,7 +450,9 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
       {url && (
         <Card title="✔ ¡Listo! Tu base está en línea" icon={<span>🎉</span>}
-              sub="Cópiala y pégala en FacturaPro → Conecta tu base de datos → «Probar conexión» y «Guardar y activar». Lleva la clave: por eso está oculta.">
+              sub={resultado?.enviada
+                ? 'FacturaPro ya recibió esta conexión solo (con el código de enlace): no tienes que pegar nada. Queda aquí por si la necesitas.'
+                : 'Sin código de enlace: cópiala y pégala en FacturaPro → Conecta tu base de datos. O guarda el código de enlace (abajo) y vuelve a «Configurar todo»: la app la manda sola.'}>
           <div className="row gap-4 items-center">
             <input className="input mono flex-1" readOnly value={verClave ? url : urlOculta} />
             <button className="btn btn-sm" onClick={() => setVerClave(v => !v)}>{verClave ? 'Ocultar' : 'Mostrar'}</button>

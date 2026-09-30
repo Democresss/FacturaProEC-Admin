@@ -157,7 +157,8 @@ def progreso(desde: int = 0) -> Dict[str, Any]:
 @router.post("/enlace")
 def enlace(c: Codigo) -> Dict[str, Any]:
     try:
-        return dict(fs.guardar_enlace(c.codigo), message="Enlace con FacturaPro guardado")
+        r = fs.guardar_enlace(c.codigo)
+        return dict(r, message="Enlace con FacturaPro guardado. " + (r.get("siguiente") or ""))
     except ValueError as e:
         return {"ok": False, "message": str(e)}
 
