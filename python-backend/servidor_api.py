@@ -51,6 +51,7 @@ class Motor(BaseModel):
 class Paquete(BaseModel):
     ruta: str
     con_clave: bool = False   # sin ayudante: pedir la clave (ventana del sistema o terminal) en una tarea
+    clave: Optional[str] = None   # o la clave escrita en el aviso de actualización (no se guarda)
 
 
 class Nombre(BaseModel):
@@ -61,14 +62,17 @@ class Nombre(BaseModel):
 class Accion(BaseModel):
     accion: str
     objetivo: Optional[str] = None
+    clave: Optional[str] = None   # Linux: clave de administrador escrita en la app (solo se usa ahora, no se guarda)
 
 
 ACCIONES = ("todo", "automatico", "docker-al-arrancar", "vigilante", "quitar-vigilante", "detener-suelto", "modo-admin")
 
 
-def _pedir_admin():
-    """Lo que necesita administrador se repite como administrador: en Linux con la ventana de clave del sistema
-    (pkexec) y en Windows con la ventana de permiso de Windows."""
+def _pedir_admin(clave: Optional[str] = None):
+    """Lo que necesita administrador se repite como administrador: en Linux con la clave escrita en la app (sudo) o,
+    sin ella, el ayudante / la ventana de clave del sistema; en Windows con la ventana de permiso de Windows."""
+    if clave:
+        return lambda bandera: fs._abrir_como_admin(bandera, clave=clave)
     return fs._abrir_como_admin
 
 
@@ -120,7 +124,7 @@ def instalar_actualizacion(p: Paquete) -> Dict[str, Any]:
     """Linux: la actualización descargada (.deb/.rpm) la instala el ayudante, sin pedir la clave."""
     if not fs.ayudante_disponible():
         if p.con_clave:
-            r = _tarea("actualizar", fs.instalar_actualizacion_con_clave, p.ruta)
+            r = _tarea("actualizar", fs.instalar_actualizacion_con_clave, p.ruta, p.clave or None)
             return dict(r, en_curso=bool(r.get("ok")))
         return {"ok": False, "sin_ayudante": True, "message": "Sin Modo administrador: se pedirá la clave del sistema."}
     r = fs.ayudante({"orden": "instalar-paquete", "ruta": p.ruta})
@@ -182,7 +186,7 @@ def servicios() -> Dict[str, Any]:
 def servicio_accion(a: Accion) -> Dict[str, Any]:
     if a.accion not in ACCIONES:
         return {"ok": False, "message": "Acción desconocida"}
-    return _tarea("servicios", fs.automatizar, a.accion, a.objetivo, _pedir_admin())
+    return _tarea("servicios", fs.automatizar, a.accion, a.objetivo, _pedir_admin(a.clave))
 
 
 def arrancar_vigilante_de_la_app() -> None:

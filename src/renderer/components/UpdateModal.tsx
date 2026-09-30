@@ -40,6 +40,8 @@ export function UpdateModal() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notas, setNotas] = useState<string[]>([]);
   const [instalando, setInstalando] = useState(false);
+  const [pideClave, setPideClave] = useState(false);
+  const [clave, setClave] = useState('');
 
   const reset = useCallback(() => {
     setState('idle');
@@ -53,14 +55,15 @@ export function UpdateModal() {
     const ea = (window as any).electronAPI;
     setInstalando(true);
     let r: any = null;
-    try { r = await ea?.update?.install(); } catch (e: any) { r = { ok: false, message: String(e?.message || e) }; }
+    try { r = await ea?.update?.install(pideClave ? clave : undefined); } catch (e: any) { r = { ok: false, message: String(e?.message || e) }; }
+    setClave('');
     // Si se instaló, la app se cierra y se vuelve a abrir sola; si no, se dice por qué (antes no pasaba nada)
     if (r && r.ok === false) {
       setInstalando(false);
       setErrorMsg(r.message || 'No se pudo instalar');
       setState('error');
     }
-  }, []);
+  }, [pideClave, clave]);
 
   const handleDismiss = useCallback(() => {
     if (state === 'available') return; // No dejar cerrar mientras descarga
@@ -90,6 +93,7 @@ export function UpdateModal() {
           setPercent(0);
         } else if (p.state === 'downloaded') {
           setDismissed(false);
+          ea?.update?.necesitaClave?.().then((v: boolean) => setPideClave(!!v)).catch(() => {});
           setState('downloaded');
           setVersion(p.version || null);
           setPercent(100);
@@ -120,7 +124,7 @@ export function UpdateModal() {
     footer = (
       <>
         <button className="btn" onClick={handleDismiss}>Más tarde</button>
-        <button className="btn btn-primary" onClick={handleInstall} disabled={instalando}>
+        <button className="btn btn-primary" onClick={handleInstall} disabled={instalando || (pideClave && !clave)}>
           {instalando ? 'Instalando…' : '↻ Reiniciar y actualizar'}
         </button>
       </>
@@ -171,9 +175,19 @@ export function UpdateModal() {
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
             {instalando
-              ? 'Instalando… Si te pide la clave del sistema, escríbela (por Escritorio remoto se abre una terminal para eso). La app se vuelve a abrir sola.'
-              : 'Con «Más tarde» se instala sola cuando la app quede en la bandeja. El túnel sigue en línea mientras tanto (corre en Docker).'}
+              ? 'Instalando… La app se cierra y se vuelve a abrir sola en la versión nueva.'
+              : 'El túnel sigue en línea mientras tanto (corre en Docker).'}
           </div>
+          {pideClave && !instalando && (
+            <div style={{ marginTop: 12 }}>
+              <label className="form-label">Clave de tu usuario de Linux (la de «sudo»)</label>
+              <input className="input" type="password" autoFocus value={clave} onChange={e => setClave(e.target.value)}
+                     onKeyDown={e => { if (e.key === 'Enter' && clave) handleInstall(); }} />
+              <div className="fs-11 muted" style={{ marginTop: 4 }}>
+                Solo se usa para instalar esta actualización y no se guarda. Activa el «Modo administrador» para no volver a escribirla.
+              </div>
+            </div>
+          )}
           {novedades}
         </div>
       )}

@@ -7,6 +7,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Card } from '../components/Card';
 import { AsyncButton } from '../components/Button';
+import { Modal } from '../components/Modal';
 
 type Call = (path: string, opts?: RequestInit) => Promise<any>;
 type Toast = (title: string, body?: string, kind?: any) => void;
@@ -141,8 +142,30 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     return empezar('configurar', '/api/servidor/configurar', o);
   };
 
-  const accionServicio = (accion: string, objetivo?: string | number) =>
-    empezar('servicios', '/api/servidor/servicios/accion', { accion, objetivo: objetivo == null ? null : String(objetivo) });
+  const accionServicio = (accion: string, objetivo?: string | number, clave?: string) =>
+    empezar('servicios', '/api/servidor/servicios/accion', { accion, objetivo: objetivo == null ? null : String(objetivo), clave: clave || null });
+
+  // Linux sin Modo administrador: lo que necesita administrador pide la clave AQUÍ (la ventana de clave del sistema
+  // y la terminal no funcionan por Escritorio remoto). Se usa una vez y no se guarda.
+  const esLinux = String(a?.sistema?.so || '').startsWith('Linux');
+  const adminActivo = (servs?.servicios || []).find(x => x.id === 'admin')?.automatico === true;
+  const necesitaClave = (accion: string) => esLinux && !adminActivo &&
+    (accion === 'modo-admin' || accion === 'docker-al-arrancar' ||
+     (accion === 'todo' && (servs?.servicios || []).some(x => (x.accion === 'modo-admin' || x.accion === 'docker-al-arrancar'))));
+  const [pidiendo, setPidiendo] = useState<{ accion: string; objetivo?: string | number } | null>(null);
+  const [claveAdmin, setClaveAdmin] = useState('');
+  const accionConClave = (accion: string, objetivo?: string | number) => {
+    if (necesitaClave(accion)) { setClaveAdmin(''); setPidiendo({ accion, objetivo }); return; }
+    return accionServicio(accion, objetivo);
+  };
+  const enviarClave = () => {
+    if (!pidiendo || !claveAdmin) return;
+    const { accion, objetivo } = pidiendo;
+    const c = claveAdmin;
+    setPidiendo(null);
+    setClaveAdmin('');
+    return accionServicio(accion, objetivo, c);
+  };
 
   const appAutomatica = async () => {
     const ea = (window as any).electronAPI;
@@ -166,7 +189,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   const hacerTodo = async () => {
     if (appAuto === false) await appAutomatica();
-    await accionServicio('todo');
+    await accionConClave('todo');
   };
 
   const motores: MotorDocker[] = dock.motores || [];
@@ -248,7 +271,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               {s.accion && (
                 <AsyncButton size="sm" variant={s.accion === 'detener-suelto' ? 'danger' : 'primary'} disabled={!!tarea}
                              confirmText={s.accion === 'detener-suelto' ? 'Se detiene ese bore (lo que publica deja de verse desde internet).' : undefined}
-                             onClick={() => s.accion === 'app' ? appAutomatica() : accionServicio(s.accion!, s.contenedor ?? s.pid)}>
+                             onClick={() => s.accion === 'app' ? appAutomatica() : accionConClave(s.accion!, s.contenedor ?? s.pid)}>
                   {s.tipo === 'vigilante' && s.instalado ? 'Actualizar' : TEXTO_ACCION[s.accion] || s.accion}
                 </AsyncButton>
               )}
@@ -428,6 +451,19 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           </div>
         </Card>
       )}
+
+      <Modal open={!!pidiendo} title="Clave de administrador" onClose={() => { setPidiendo(null); setClaveAdmin(''); }} maxWidth={440}
+             footer={<>
+               <button className="btn" onClick={() => { setPidiendo(null); setClaveAdmin(''); }}>Cancelar</button>
+               <button className="btn btn-primary" disabled={!claveAdmin} onClick={enviarClave}>Continuar</button>
+             </>}>
+        <div className="fs-13" style={{ marginBottom: 10 }}>
+          Escribe la clave de tu usuario de Linux (la misma de «sudo»). Se usa <b>una sola vez</b> para dar los permisos y
+          <b> no se guarda</b>. Con el Modo administrador activo, la app no la vuelve a pedir.
+        </div>
+        <input className="input" type="password" autoFocus value={claveAdmin} onChange={e => setClaveAdmin(e.target.value)}
+               onKeyDown={e => { if (e.key === 'Enter') enviarClave(); }} />
+      </Modal>
 
       <Card title="Registro" icon={<span>📜</span>} right={tarea ? <span className="badge">{tarea}…</span> : undefined}>
         <div className="log-box" style={{ maxHeight: 260, overflow: 'auto' }}>

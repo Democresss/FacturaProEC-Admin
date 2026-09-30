@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1864,7 +1864,7 @@ def _instalar_paquete(ruta, usuario):
     return {"ok": True, "reiniciar": reiniciar}
 
 
-def instalar_actualizacion_con_clave(ruta):
+def instalar_actualizacion_con_clave(ruta, clave=None):
     """Sin ayudante: instala la actualización .deb/.rpm descargada pidiendo la clave del sistema (la ventana; si no
     responde, como por Escritorio remoto, una terminal). Antes la instalaba electron-updater con pkexec: si fallaba,
     no se mostraba nada y el botón «Reiniciar y actualizar» parecía no hacer nada."""
@@ -1879,9 +1879,16 @@ def instalar_actualizacion_con_clave(ruta):
         comando = ([herramienta, "install", "-y", real] if herramienta in ("dnf", "yum")
                    else ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", real] if herramienta
                    else ["rpm", "-U", "--replacepkgs", real])
+    if clave:
+        log("Instalando la actualización…", "paso")
+        code, out = con_sudo(comando, clave)
+        if code != 0:
+            raise RuntimeError("No se pudo instalar la actualización: %s" % (out or "")[-300:])
+        log("Actualización instalada.", "ok")
+        return {"ok": True}
     log("Instalando la actualización (pide la clave del sistema)…", "paso")
     if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
-        code, out = run(["pkexec"] + comando, timeout=1800)
+        code, out = run(["pkexec"] + comando, timeout=90)
         if code == 0:
             log("Actualización instalada.", "ok")
             return {"ok": True}
@@ -2399,10 +2406,37 @@ def tarjetas_de(a):
     return t
 
 
-def _abrir_como_admin(argumento):
-    """Sin permisos: repite la acción como administrador (Linux: ventana de clave del sistema con pkexec;
-    Windows: la ventana de permiso de Windows)."""
+class ClaveIncorrecta(RuntimeError):
+    """La clave de administrador escrita en la app no es la correcta."""
+
+
+def con_sudo(comando, clave, timeout=1800):
+    """Ejecuta como administrador con la clave que el usuario escribió en la app (sudo -S: la clave va por la entrada
+    del proceso, no queda en ningún archivo, registro ni en la lista de procesos). Funciona igual por Escritorio remoto,
+    donde la ventana de clave del sistema no aparece."""
+    entorno = dict(os.environ, LC_ALL="C", LANG="C")
+    code, out = run(["sudo", "-S", "-k", "-p", "", "--"] + list(comando), timeout=timeout, entrada=(clave or "") + "\n", env=entorno)
+    if code != 0:
+        if re.search(r"incorrect password|sorry, try again|password is required|no password was provided", out or "", re.I):
+            raise ClaveIncorrecta("La clave no es correcta. Es la clave de tu usuario de Linux (la misma de «sudo»).")
+        if re.search(r"not in the sudoers|is not allowed to run sudo|may not run sudo", out or "", re.I):
+            raise RuntimeError("Tu usuario de Linux no es administrador (no puede usar sudo).")
+    return code, out
+
+
+def _abrir_como_admin(argumento, clave=None):
+    """Sin permisos: repite la acción como administrador. Linux: con la clave escrita en la app (sudo), si no con el
+    ayudante, la ventana de clave del sistema o una terminal. Windows: la ventana de permiso de Windows."""
     comando = (_comando_vigilante()[:-1]) + [argumento]
+    if clave and not ES_WINDOWS:
+        log("Aplicando como administrador…", "paso")
+        code, out = con_sudo(comando, clave)
+        for linea in (out or "").splitlines()[-15:]:
+            if linea.strip():
+                log(linea.strip().lstrip("✔✖!»· ").strip(), "ok" if code == 0 else "aviso")
+        if code != 0:
+            raise RuntimeError("No se pudo completar como administrador: %s" % (out or "")[-300:])
+        return
     if ES_WINDOWS:
         def q(x):
             return "'%s'" % x.replace("'", "''")
@@ -2421,7 +2455,7 @@ def _abrir_como_admin(argumento):
             raise RuntimeError("El ayudante no pudo completarlo: %s" % (r.get("error") or (r.get("salida") or "")[-300:]))
         return
     if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
-        code, out = run(["pkexec"] + comando, timeout=3600)
+        code, out = run(["pkexec"] + comando, timeout=90)
         if code == 0:
             return
         if code == 126:
@@ -2450,14 +2484,22 @@ def _admin_por_terminal(comando):
                   ("xfce4-terminal", ["-e", "bash " + shlex.quote(guion)]), ("konsole", ["-e", "bash", guion]),
                   ("tilix", ["-e", "bash " + shlex.quote(guion)]), ("x-terminal-emulator", ["-e", "bash", guion]),
                   ("xterm", ["-e", "bash", guion])]
+    abierta = False
     for nombre, args in terminales:
-        if shutil.which(nombre):
-            subprocess.Popen([nombre] + args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            break
-    else:
-        raise RuntimeError("Abre una terminal y ejecuta esto (pide tu clave una sola vez):\n%s" % linea)
+        if not shutil.which(nombre):
+            continue
+        proc = subprocess.Popen([nombre] + args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if proc.wait(timeout=4) != 0:
+                continue          # no pudo abrir la ventana (p. ej. gnome-terminal por Escritorio remoto)
+        except subprocess.TimeoutExpired:
+            pass                  # sigue abierta: es la ventana
+        abierta = True
+        break
+    if not abierta:
+        raise RuntimeError("No se pudo abrir una terminal. Escribe la clave en la app o ejecuta en una terminal:\n%s" % linea)
     log("Se abrió una terminal: escribe ahí tu clave de administrador.", "paso")
-    for _ in range(600):
+    for _ in range(300):
         if os.path.exists(marca):
             try:
                 codigo = int(open(marca, encoding="utf-8").read().strip() or 1)

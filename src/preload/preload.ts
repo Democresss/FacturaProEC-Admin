@@ -35,7 +35,8 @@ const api = {
   openExternal: (url: string) => ipcRenderer.invoke('shell:open', url),
   update: {
     check: () => ipcRenderer.invoke('update:check'),
-    install: () => ipcRenderer.invoke('update:install'),
+    install: (clave?: string) => ipcRenderer.invoke('update:install', clave),
+    necesitaClave: () => ipcRenderer.invoke('update:necesita-clave') as Promise<boolean>,
     onStatus: (cb: (s: any) => void) => {
       const h = (_e: unknown, p: any) => cb(p);
       ipcRenderer.on('update:status', h);

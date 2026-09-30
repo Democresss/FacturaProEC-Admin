@@ -478,9 +478,10 @@ function setupIpc() {
       return { ok: false, message: String(e?.message || e) };
     }
   });
-  ipcMain.handle('update:install', async () => {
+  ipcMain.handle('update:necesita-clave', () => necesitaClave());
+  ipcMain.handle('update:install', async (_e, clave?: string) => {
     try {
-      return await instalarAhora();
+      return await instalarAhora(typeof clave === 'string' ? clave : undefined);
     } catch (e: any) {
       return { ok: false, message: String(e?.message || e) };
     }
@@ -529,10 +530,10 @@ async function bridge(ruta: string, cuerpo?: any): Promise<any> {
 
 /** Sin ayudante: el backend instala el paquete pidiendo la clave (ventana del sistema o, si no responde, una
  *  terminal). Se espera hasta 15 minutos a que termine. */
-async function instalarConClave(): Promise<{ ok: boolean; message?: string }> {
+async function instalarConClave(clave?: string): Promise<{ ok: boolean; message?: string }> {
   if (!LINUX_PAQUETE || !archivoDescargado || !bridgePort) return { ok: false, message: 'No hay paquete descargado' };
   try {
-    const inicio = await bridge('/api/servidor/instalar-actualizacion', { ruta: archivoDescargado, con_clave: true });
+    const inicio = await bridge('/api/servidor/instalar-actualizacion', { ruta: archivoDescargado, con_clave: true, clave: clave || null });
     if (!inicio?.en_curso) return { ok: false, message: inicio?.message || 'No se pudo empezar la instalación' };
     const desde = Date.now();
     while (Date.now() - desde < 15 * 60 * 1000) {
@@ -598,13 +599,19 @@ function buscarActualizacion(desdeElMenu = false) {
 
 /** Instala YA la versión descargada, con la app abierta o en la bandeja: sin preguntar en Windows y AppImage;
  *  en .deb/.rpm con el ayudante (sin clave) o, si no está, con la ventana de clave del sistema. Luego se reabre. */
-async function instalarAhora(): Promise<{ ok: boolean; message?: string }> {
+/** Linux .deb/.rpm sin el ayudante (Modo administrador): el aviso pide la clave dentro de la app. */
+async function necesitaClave(): Promise<boolean> {
+  if (!LINUX_PAQUETE || !bridgePort) return false;
+  try { return !(await bridge('/api/servidor/ayudante'))?.disponible; } catch { return true; }
+}
+
+async function instalarAhora(clave?: string): Promise<{ ok: boolean; message?: string }> {
   if (!actualizacionLista) return { ok: false, message: 'Todavía no hay una versión descargada' };
   const oculta = !(mainWindow && mainWindow.isVisible());
   regAct(`instalar ${versionLista} (${oculta ? 'en la bandeja' : 'con la ventana abierta'})`);
   if (await instalarConAyudante()) { regAct('instalada con el ayudante'); reabrirActualizada(oculta); return { ok: true }; }
   if (LINUX_PAQUETE) {
-    const r = await instalarConClave();
+    const r = await instalarConClave(clave);
     regAct(r.ok ? 'instalada con la clave del sistema' : `NO se instaló: ${r.message}`);
     if (r.ok) reabrirActualizada(oculta);
     return r;
