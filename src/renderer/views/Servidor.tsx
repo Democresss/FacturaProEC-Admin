@@ -413,7 +413,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           </div>
           <label className="row items-center gap-4 fs-13" style={{ margin: '8px 0' }}>
             <input type="checkbox" checked={minio} onChange={e => setMinio(e.target.checked)} />
-            <span>Publicar también MinIO (opcional: tus archivos ya se guardan en tu base)</span>
+            <span>Publicar también MinIO <b>con SSL</b> y configurarlo solo en FacturaPro (usuario propio, solo su bucket). Opcional: sin esto tus archivos se guardan en tu base.</span>
           </label>
           {listaMinio.length > 0 && (
             <div className="form-row">

@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -52,6 +52,9 @@ RED = "facpro-red"
 C_PG, C_MINIO = "facpro-postgres", "facpro-minio"
 C_BORE_PG, C_BORE_MINIO = "facpro-bore-postgres", "facpro-bore-minio"
 IMG_PG, IMG_MINIO, IMG_BORE, IMG_ALPINE = "postgres:17", "minio/minio", "ekzhang/bore", "alpine:3"
+IMG_SOCAT, IMG_MC = "alpine/socat", "minio/mc"
+C_MINIO_TLS, V_MINIO_TLS = "facpro-minio-tls", "facpro-minio-tls"
+BUCKET_FACTURAPRO = "facturapro-media"
 BASE_NUEVA = "__nueva__"
 PUERTOS_BORE = (20000, 64999)
 
@@ -429,12 +432,12 @@ def _separar(clave):
     return "", clave
 
 
-def dk(*args, timeout=180, host=None):
+def dk(*args, timeout=180, host=None, entrada=None):
     """docker …; con host (o dentro de «with en_motor(host)»), en ese Docker del mismo equipo."""
     host = host or getattr(_HILO, "host", None)
     if host:
-        return run([DOCKER] + list(args), timeout=timeout, env=dict(os.environ, DOCKER_HOST=host))
-    return run([DOCKER] + list(args), timeout=timeout)
+        return run([DOCKER] + list(args), timeout=timeout, env=dict(os.environ, DOCKER_HOST=host), entrada=entrada)
+    return run([DOCKER] + list(args), timeout=timeout, entrada=entrada)
 
 
 def docker_estado():
@@ -1099,6 +1102,117 @@ def cerrar_tunel(nombre, host=None):
     return {"ok": True}
 
 
+def _pem(texto):
+    m = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", texto or "", re.S)
+    return (m.group(0) + "\n") if m else ""
+
+
+def certificado_minio():
+    """Certificado propio para el MinIO que sale por internet (volumen facpro-minio-tls). Se crea una sola vez y se
+    reutiliza: FacturaPro confía SOLO en él. Devuelve el certificado (PEM, público; la llave privada no sale)."""
+    code, out = dk("run", "--rm", "-v", V_MINIO_TLS + ":/c", IMG_ALPINE, "cat", "/c/cert.pem", timeout=300)
+    pem = _pem(out) if code == 0 else ""
+    if pem:
+        return pem
+    log("Creando el certificado SSL para MinIO…", "paso")
+    code, out = dk("run", "--rm", "-v", V_MINIO_TLS + ":/c", IMG_ALPINE, "sh", "-c",
+                   "apk add --no-cache openssl >/dev/null 2>&1 && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 "
+                   "-subj /CN=%s -addext subjectAltName=DNS:%s -keyout /c/key.pem -out /c/cert.pem >/dev/null 2>&1 "
+                   "&& chmod 600 /c/key.pem && chmod 644 /c/cert.pem && cat /c/cert.pem" % (BORE_HOST, BORE_HOST), timeout=900)
+    pem = _pem(out)
+    if code != 0 or not pem:
+        raise RuntimeError("No se pudo crear el certificado SSL de MinIO: %s" % out[-300:])
+    return pem
+
+
+def intermediario_ssl_minio(destino, extra=None):
+    """Contenedor facpro-minio-tls: recibe con SSL en el 9443 y le pasa a MinIO por dentro de Docker. Tu MinIO no se
+    toca (sigue igual para lo que lo use en tu red); lo que sale por internet va cifrado."""
+    dk("rm", "-f", C_MINIO_TLS)
+    code, out = dk(*(["run", "-d", "--name", C_MINIO_TLS, "--network", RED, "--restart", "always"] + (extra or [])
+                     + ["-v", V_MINIO_TLS + ":/c:ro", IMG_SOCAT,
+                        "openssl-listen:9443,reuseaddr,fork,cert=/c/cert.pem,key=/c/key.pem,verify=0",
+                        "tcp:%s:9000" % destino]), timeout=900)
+    if code != 0:
+        raise RuntimeError("No se pudo crear el intermediario SSL de MinIO: %s" % out[-300:])
+    log("MinIO sale por internet con SSL (intermediario «%s»)." % C_MINIO_TLS, "ok")
+
+
+def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTURAPRO):
+    """Usuario «facturapro_app» de MinIO con permiso SOLO sobre su bucket (no la clave maestra). Devuelve su clave.
+    La clave maestra va en un archivo temporal (no en la línea de comandos) y se borra al terminar."""
+    clave = clave_segura(40)
+    politica = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:*"], "Resource": [
+        "arn:aws:s3:::%s" % bucket, "arn:aws:s3:::%s/*" % bucket]}]})
+    archivo = os.path.join(carpeta_datos(), ".mc-%d.env" % os.getpid())
+    os.makedirs(carpeta_datos(), exist_ok=True)
+    with open(archivo, "w", encoding="utf-8") as f:
+        f.write("MC_HOST_l=http://%s:%s@%s:9000\n" % (quote(root_usuario, safe=""), quote(root_clave, safe=""), destino))
+    if not ES_WINDOWS:
+        os.chmod(archivo, 0o600)
+    try:
+        def mc(*args, entrada=None):
+            return dk(*(["run", "--rm", "-i", "--network", RED, "--env-file", archivo, IMG_MC] + list(args)),
+                      timeout=600, entrada=entrada)
+        pasos = [(("mb", "--ignore-existing", "l/" + bucket), None),
+                 (("admin", "user", "add", "l", USUARIO_FACTURAPRO, clave), None),
+                 (("admin", "policy", "create", "l", "facturapro-archivos", "/dev/stdin"), politica),
+                 (("admin", "policy", "attach", "l", "facturapro-archivos", "--user", USUARIO_FACTURAPRO), None)]
+        for args, entrada in pasos:
+            code, out = mc(*args, entrada=entrada)
+            if code != 0 and not re.search(r"already|ya existe", out or "", re.I):
+                raise RuntimeError("MinIO: no se pudo «%s»: %s" % (" ".join(args[:3]), (out or "")[-300:]))
+    finally:
+        try:
+            os.remove(archivo)
+        except OSError:
+            pass
+    log("MinIO: usuario «%s» solo para el bucket «%s» (sin la clave maestra)." % (USUARIO_FACTURAPRO, bucket), "ok")
+    return clave
+
+
+def informar_archivos(minio, config=None):
+    """Configura los archivos en FacturaPro (MinIO con SSL) con el código de enlace. True/False; None si ese FacturaPro
+    todavía no tiene esta opción."""
+    import urllib.error
+    import urllib.request
+    config = config if config is not None else leer_config()
+    codigo = config.get("enlace_facturapro") or ""
+    if not codigo:
+        return False
+    try:
+        datos = leer_enlace(codigo)
+    except ValueError as e:
+        _AVISO["motivo"] = str(e)
+        return False
+    cuerpo = json.dumps({"codigo": codigo, "minio": minio}).encode("utf-8")
+    peticion = urllib.request.Request(datos["u"].rstrip("/") + "/v2/servidor-empresa/archivos", data=cuerpo, method="POST",
+                                      headers={"Content-Type": "application/json", "User-Agent": "FacProServidor/" + VERSION})
+    try:
+        with urllib.request.urlopen(peticion, timeout=90) as r:
+            respuesta = json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 405):
+            return None
+        try:
+            motivo = json.loads(e.read().decode("utf-8") or "{}").get("error") or e.reason
+        except Exception:
+            motivo = e.reason
+        evento("FacturaPro no aceptó MinIO: %s" % motivo, "error")
+        return False
+    except Exception as e:  # noqa: BLE001
+        log(problema_enlace(datos["u"]) or "No se pudo mandar MinIO a FacturaPro (%s)." % e, "aviso")
+        return False
+    if not respuesta.get("success"):
+        evento("FacturaPro no aceptó MinIO: %s" % respuesta.get("error"), "error")
+        return False
+    config = leer_config()
+    config.update(archivos_informados=time.strftime("%Y-%m-%d %H:%M"))
+    guardar_config(config)
+    evento("FacturaPro ya guarda tus archivos en tu MinIO, con SSL (bucket %s)." % (respuesta.get("bucket") or ""), "ok")
+    return True
+
+
 def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=None):
     """Túnel en bore.pub con puerto fijo; si el puerto está ocupado, prueba otro. Devuelve el puerto."""
     dk("rm", "-f", nombre)
@@ -1200,7 +1314,7 @@ def configurar(opciones):
             if code != 0:
                 raise RuntimeError("No se pudo crear MinIO: %s" % out[-300:])
             m_cont = C_MINIO
-            minio = {"usuario": m_usuario, "clave": m_clave}
+            minio = {"root_usuario": m_usuario, "root_clave": m_clave}
             log("MinIO creado (consola en este equipo: http://localhost:9001)", "ok")
         elif m_info["estado"] == "contenedor":
             m_cont = m_info["contenedor"]
@@ -1208,15 +1322,23 @@ def configurar(opciones):
                 dk("start", m_cont)
             conectar_a_red(m_cont)
             env = env_de(inspeccionar(m_cont))
-            minio = {"usuario": env.get("MINIO_ROOT_USER") or env.get("MINIO_ACCESS_KEY") or "",
-                     "clave": env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY") or ""}
+            minio = {"root_usuario": env.get("MINIO_ROOT_USER") or env.get("MINIO_ACCESS_KEY") or "",
+                     "root_clave": env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY") or ""}
             log("MinIO encontrado en Docker: «%s»" % m_cont, "ok")
         else:
             m_cont = "host.docker.internal"
-        puerto_minio = levantar_bore(C_BORE_MINIO, m_cont, 9000, config.get("bore_puerto_minio"),
-                                     ["--add-host", "host.docker.internal:host-gateway"] if (m_cont == "host.docker.internal" and not ES_WINDOWS) else None)
-        minio.update({"endpoint": "http://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont,
-                      "docker_host": m_host or ""})
+        # Por internet MinIO sale SOLO con SSL: intermediario con certificado propio delante de MinIO (no se toca)
+        extra_host = ["--add-host", "host.docker.internal:host-gateway"] if (m_cont == "host.docker.internal" and not ES_WINDOWS) else None
+        ca_pem = certificado_minio()
+        intermediario_ssl_minio(m_cont, extra_host)
+        puerto_minio = levantar_bore(C_BORE_MINIO, C_MINIO_TLS, 9443, config.get("bore_puerto_minio"))
+        if not (minio.get("root_usuario") and minio.get("root_clave")):
+            raise RuntimeError("No encontré la clave maestra de MinIO en la configuración del contenedor: no puedo crear el "
+                               "usuario de FacturaPro. (El túnel con SSL quedó listo.)")
+        m_clave_app = usuario_minio_propio(m_cont, minio["root_usuario"], minio["root_clave"])
+        minio = {"endpoint": "https://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont,
+                 "docker_host": m_host or "", "usuario": USUARIO_FACTURAPRO, "clave": m_clave_app,
+                 "bucket": BUCKET_FACTURAPRO, "ca_pem": ca_pem}
         _HILO.host = None
 
     # 5. Prueba desde internet
@@ -1260,9 +1382,13 @@ def configurar(opciones):
         enviada = informar_conexion(url, nuevo)
         if enviada is None:
             informar_direccion(puerto_pg, nuevo)
+        if minio.get("clave"):
+            informar_archivos({"endpoint": minio["endpoint"], "access_key": minio["usuario"], "secret_key": minio["clave"],
+                               "bucket": minio["bucket"], "ca_pem": minio["ca_pem"]}, nuevo)
     else:
         log("Sin código de enlace: copia la dirección de abajo en FacturaPro (o guarda el código y vuelve a «Configurar todo»).", "aviso")
-    return {"url": url, "ssl": en_linea is True, "puerto": puerto_pg, "base": base, "usuario": usuario, "minio": minio or None,
+    minio_pantalla = {k: v for k, v in (minio or {}).items() if k not in ("clave", "root_clave", "ca_pem")} or None
+    return {"url": url, "ssl": en_linea is True, "puerto": puerto_pg, "base": base, "usuario": usuario, "minio": minio_pantalla,
             "facturapro": URL_FACTURAPRO, "enviada": bool(enviada)}
 
 
