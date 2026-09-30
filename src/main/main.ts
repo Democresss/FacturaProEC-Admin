@@ -25,6 +25,9 @@ let isQuitting = false;
 let actualizacionLista = false;   // descargada: se instala en cuanto la app quede en segundo plano
 let descargando = false;
 let archivoDescargado = '';   // ruta del .deb/.rpm/.exe descargado por electron-updater
+let versionLista = '';
+let ultimaRevision = 0;
+let ultimoEstado: any = null;   // último aviso de actualización, para volver a mostrarlo al abrir la ventana
 
 // Tras instalar una actualización en segundo plano la app vuelve a abrirse igual: escondida en la bandeja.
 const MARCA_OCULTA = () => path.join(app.getPath('userData'), 'arrancar-oculta');
@@ -291,9 +294,19 @@ function createTray() {
   const iconPath = resolveTrayIcon();
   const img = nativeImage.createFromPath(iconPath);
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
+  tray.setToolTip(`${NOMBRE} — trabajando en segundo plano`);
+  tray.on('click', () => showMainWindow());
+  armarMenuBandeja();
+}
 
+/** El menú de la bandeja muestra «Instalar la versión X ahora» en cuanto hay una actualización lista. */
+function armarMenuBandeja() {
+  if (!tray) return;
   const menu = Menu.buildFromTemplate([
     { label: `Abrir ${NOMBRE}`, click: () => showMainWindow() },
+    ...(actualizacionLista
+      ? [{ label: `⬇ Instalar la versión ${versionLista} ahora`, click: () => { instalarAhora(); } }]
+      : [{ label: 'Buscar actualizaciones', click: () => buscarActualizacion(true) }]),
     { type: 'separator' },
     {
       label: 'Tema',
@@ -306,10 +319,8 @@ function createTray() {
     { type: 'separator' },
     { label: 'Salir (el túnel sigue; el vigilante también si lo instalaste)', click: () => quitApp() },
   ]);
-
-  tray.setToolTip(`${NOMBRE} — trabajando en segundo plano`);
   tray.setContextMenu(menu);
-  tray.on('click', () => showMainWindow());
+  if (actualizacionLista) tray.setToolTip(`${NOMBRE} — versión ${versionLista} lista para instalar`);
 }
 
 function showMainWindow() {
@@ -320,6 +331,14 @@ function showMainWindow() {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   }
+  alMostrarVentana();
+}
+
+/** Cada vez que se abre la ventana: si hay una versión lista se vuelve a mostrar el aviso, y si pasaron más de
+ *  10 minutos desde la última revisión, se busca otra vez (antes solo al arrancar y cada 4 horas). */
+function alMostrarVentana() {
+  if (ultimoEstado) mainWindow?.webContents.send('update:status', ultimoEstado);
+  if (app.isPackaged && Date.now() - ultimaRevision > 10 * 60 * 1000) buscarActualizacion();
 }
 
 function quitApp() {
@@ -461,8 +480,7 @@ function setupIpc() {
   });
   ipcMain.handle('update:install', async () => {
     try {
-      if (await instalarConAyudante()) { reabrirActualizada(false); return { ok: true }; }
-      autoUpdater.quitAndInstall();
+      await instalarAhora();
       return { ok: true };
     } catch (e: any) {
       return { ok: false, message: String(e?.message || e) };
@@ -530,8 +548,23 @@ async function instalarSiEstaOculta() {
   autoUpdater.quitAndInstall(true, true);
 }
 
-function buscarActualizacion() {
+function buscarActualizacion(desdeElMenu = false) {
+  if (!app.isPackaged) return;
+  ultimaRevision = Date.now();
+  if (desdeElMenu) showMainWindow();
   autoUpdater.checkForUpdates().catch((e: any) => console.warn('[update] no se pudo revisar:', e?.message || e));
+}
+
+/** Instala YA la versión descargada, con la app abierta o en la bandeja: sin preguntar en Windows y AppImage;
+ *  en .deb/.rpm con el ayudante (sin clave) o, si no está, con la ventana de clave del sistema. Luego se reabre. */
+async function instalarAhora() {
+  if (!actualizacionLista) return;
+  const oculta = !(mainWindow && mainWindow.isVisible());
+  if (await instalarConAyudante()) { reabrirActualizada(oculta); return; }
+  if (oculta) { try { fs.writeFileSync(MARCA_OCULTA(), '1'); } catch { /* noop */ } }
+  isQuitting = true;
+  stopBridge();
+  autoUpdater.quitAndInstall(true, true);
 }
 
 function setupAutoUpdater() {
@@ -545,7 +578,8 @@ function setupAutoUpdater() {
   autoUpdater.on('update-available', (info: any) => {
     console.log(`[update] Disponible v${info.version} — descargando…`);
     descargando = true;
-    mainWindow?.webContents.send('update:status', { state: 'available', version: info.version, notas: notasDe(info) });
+    ultimoEstado = { state: 'available', version: info.version, notas: notasDe(info) };
+    mainWindow?.webContents.send('update:status', ultimoEstado);
     // No usamos Notification del SO para updates: el renderer muestra un modal
     // con barra de progreso dentro de la app. Solo avisamos por SO si la app
     // está minimizada a bandeja (para no romper la UX).
@@ -560,9 +594,12 @@ function setupAutoUpdater() {
   });
   autoUpdater.on('update-downloaded', (info: any) => {
     console.log(`[update] v${info.version} descargada — reiniciar para instalar.`);
-    mainWindow?.webContents.send('update:status', { state: 'downloaded', version: info.version, notas: notasDe(info) });
+    ultimoEstado = { state: 'downloaded', version: info.version, notas: notasDe(info) };
+    mainWindow?.webContents.send('update:status', ultimoEstado);
     descargando = false;
     actualizacionLista = true;
+    versionLista = String(info.version || '');
+    armarMenuBandeja();
     archivoDescargado = String(info?.downloadedFile || '');
     // En la bandeja: se instala sola en silencio (sin notificación de Windows).
     setTimeout(instalarSiEstaOculta, 5000);
@@ -595,8 +632,8 @@ app.whenReady().then(async () => {
 
   // Comprobar actualizaciones (solo en app empaquetada; en dev no hace nada)
   if (app.isPackaged) {
-    setTimeout(buscarActualizacion, 5000);
-    setInterval(buscarActualizacion, 4 * 60 * 60 * 1000);
+    setTimeout(() => buscarActualizacion(), 5000);
+    setInterval(() => buscarActualizacion(), 30 * 60 * 1000);   // cada 30 minutos (antes cada 4 horas)
   }
 });
 

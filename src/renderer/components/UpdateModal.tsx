@@ -80,6 +80,7 @@ export function UpdateModal() {
           setVersion(p.version || null);
           setPercent(0);
         } else if (p.state === 'downloaded') {
+          setDismissed(false);
           setState('downloaded');
           setVersion(p.version || null);
           setPercent(100);

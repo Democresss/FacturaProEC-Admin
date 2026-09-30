@@ -90,6 +90,16 @@ export function ConfigView({ call, toast, theme }: ConfigViewProps) {
         </div>
       </Card>
 
+      <Card title="Actualizaciones" sub="Se buscan solas cada 30 minutos y al abrir la ventana; se instalan con la app abierta o en la bandeja" icon={<span>⬇</span>}>
+        <AsyncButton onClick={async () => {
+          const r = await (window as any).electronAPI?.update?.check?.();
+          if (!r) return;
+          if (!r.ok) toast('Actualizaciones', r.message || 'No se pudo revisar', 'warning');
+          else if (r.version && r.version !== version) toast('Actualizaciones', `Hay una versión nueva (${r.version}): se está descargando`, 'success');
+          else toast('Actualizaciones', `Ya tienes la última versión (${version})`, 'success');
+        }}>⬇ Buscar actualización ahora</AsyncButton>
+      </Card>
+
       <Card title="Acerca de" sub={`FacPro Server Manager${version ? ' v' + version : ''} — Electron + Python backend`} icon={<span>ℹ</span>}>
         <div className="fs-12 col gap-8">
           <div><span className="muted">Plataforma:</span> <span className="mono">{navigator.platform}</span></div>
