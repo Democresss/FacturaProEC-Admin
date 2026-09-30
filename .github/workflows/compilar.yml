@@ -20,7 +20,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Primero: ¿hay que compilar? Si vX.Y.Z ya está publicada (publicar el borrador crea el tag y dispara
+  # este workflow), no se toca: se recompilaría lo mismo encima de la versión que ya reciben los usuarios.
+  borrador:
+    runs-on: ubuntu-latest
+    outputs:
+      seguir: ${{ steps.b.outputs.seguir }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Crear el borrador del release (si no existe)
+        id: b
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          PUBLICADA=$(gh release list --limit 50 --json tagName,isDraft --jq ".[] | select(.tagName==\"v$V\" and (.isDraft|not)) | .tagName")
+          if [ -n "$PUBLICADA" ]; then
+            echo "v$V ya está publicada: no se vuelve a compilar."
+            echo "seguir=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          EXISTE=$(gh release list --limit 50 --json tagName --jq ".[] | select(.tagName==\"v$V\") | .tagName")
+          if [ -z "$EXISTE" ]; then
+            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "FacturaProEC Admin v$V" \
+              --notes "Windows 10/11: FacturaProEC-Admin-$V-win-x64.exe · Linux: .AppImage (cualquier distro), .deb (Ubuntu/Mint/Debian), .rpm (Fedora/openSUSE) o .tar.gz"
+          fi
+          echo "seguir=true" >> "$GITHUB_OUTPUT"
+
   backend-linux:
+    needs: borrador
+    if: needs.borrador.outputs.seguir == 'true'
     runs-on: ubuntu-latest
     # Debian 11 (glibc 2.31): el backend funciona en Ubuntu/Mint 20+, Debian 11+, Fedora y demás
     container: python:3.11-bullseye
@@ -44,6 +73,8 @@ jobs:
           path: dist-bridge/facpro-bridge
 
   backend-windows:
+    needs: borrador
+    if: needs.borrador.outputs.seguir == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,21 +97,6 @@ jobs:
         with:
           name: bridge-windows
           path: dist-bridge/facpro-bridge.exe
-
-  borrador:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Crear el borrador del release (si no existe)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          V=$(node -p "require('./package.json').version")
-          EXISTE=$(gh release list --limit 50 --json tagName --jq ".[] | select(.tagName==\"v$V\") | .tagName")
-          if [ -z "$EXISTE" ]; then
-            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "FacturaProEC Admin v$V" \
-              --notes "Windows 10/11: FacturaProEC-Admin-$V-win-x64.exe · Linux: .AppImage (cualquier distro), .deb (Ubuntu/Mint/Debian), .rpm (Fedora/openSUSE) o .tar.gz"
-          fi
 
   app-linux:
     needs: [backend-linux, borrador]
@@ -124,8 +140,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   estado:
-    needs: [backend-linux, backend-windows, app-linux, app-windows]
-    if: always()
+    needs: [borrador, backend-linux, backend-windows, app-linux, app-windows]
+    if: always() && needs.borrador.outputs.seguir == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
