@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.2"
+VERSION = "1.16.3"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -2226,6 +2226,10 @@ def instalar_actualizacion_con_clave(ruta, clave=None):
         comando = ([herramienta, "install", "-y", real] if herramienta in ("dnf", "yum")
                    else ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", real] if herramienta
                    else ["rpm", "-U", "--replacepkgs", real])
+    if os.path.exists(AYUDANTE_SERVICIO):
+        motivo = ayudante({"orden": "hola"}, timeout=5).get("error") or "no respondió"
+        log("El ayudante con permisos no responde (%s): esta vez se usa la clave. Vuelve a activar el Modo administrador "
+            "para repararlo." % motivo, "aviso")
     if clave:
         log("Instalando la actualización…", "paso")
         code, out = con_sudo(comando, clave)
@@ -2234,7 +2238,7 @@ def instalar_actualizacion_con_clave(ruta, clave=None):
         log("Actualización instalada.", "ok")
         return {"ok": True}
     log("Instalando la actualización (pide la clave del sistema)…", "paso")
-    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
+    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION") and not _sin_privilegios_nuevos():
         code, out = run(["pkexec"] + comando, timeout=90)
         if code == 0:
             log("Actualización instalada.", "ok")
@@ -2359,10 +2363,12 @@ def modo_admin_estado():
     except (KeyError, ImportError):
         vale_ya = not os.path.exists("/var/run/docker.sock")
     sistema = os.path.exists(SERVICIO_LINUX)
-    con_ayudante = os.path.exists(AYUDANTE_SERVICIO) or not shutil.which("systemctl")
+    instalado = os.path.exists(AYUDANTE_SERVICIO)
+    con_ayudante = (instalado and ayudante_disponible()) or not shutil.which("systemctl")
     faltan = (([] if grupo else ["tu usuario no puede usar el Docker del sistema"])
               + ([] if sistema else ["el vigilante no es servicio del sistema"])
-              + ([] if con_ayudante else ["el ayudante con permisos (para no volver a pedir la clave)"]))
+              + ([] if con_ayudante else ["el ayudante con permisos no responde (vuelve a activar)" if instalado
+                                          else "el ayudante con permisos (para no volver a pedir la clave)"]))
     if faltan:
         detalle = "Falta: " + ", ".join(faltan)
     elif not vale_ya:
@@ -2771,12 +2777,52 @@ class ClaveIncorrecta(RuntimeError):
     """La clave de administrador escrita en la app no es la correcta."""
 
 
+_MARCA_NNP = re.compile(r"no new privileges", re.I)
+
+
+def _entre_comillas(p):
+    import shlex
+    return shlex.quote(p)
+
+
+def _sin_privilegios_nuevos():
+    """¿Este proceso tiene la marca «no new privileges»? Algunos entornos la ponen al lanzar las apps (y la heredan sus
+    hijos): con ella sudo y pkexec no pueden subir a administrador."""
+    if ES_WINDOWS:
+        return False
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            return any(l.split()[:2] == ["NoNewPrivs:", "1"] for l in f)
+    except OSError:
+        return False
+
+
+def _fuera_de_la_app(comando, entorno=None, tuberia=True):
+    """Con la marca «no new privileges», el comando se lanza por el systemd de tu usuario: ese proceso nace de systemd,
+    no de la app, y no hereda la marca (sudo vuelve a funcionar). Espera a que termine y devuelve su código."""
+    if not _sin_privilegios_nuevos() or not shutil.which("systemd-run"):
+        return list(comando)
+    previo = ["systemd-run", "--user", "--quiet", "--collect", "--wait"] + (["--pipe"] if tuberia else [])
+    variables = dict(entorno or {})
+    for k in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "HOME", "PATH"):
+        if os.environ.get(k) and k not in variables:
+            variables[k] = os.environ[k]
+    for k, v in variables.items():
+        previo += ["--setenv=%s=%s" % (k, v)]
+    return previo + ["--"] + list(comando)
+
+
 def con_sudo(comando, clave, timeout=1800):
     """Ejecuta como administrador con la clave que el usuario escribió en la app (sudo -S: la clave va por la entrada
     del proceso, no queda en ningún archivo, registro ni en la lista de procesos). Funciona igual por Escritorio remoto,
     donde la ventana de clave del sistema no aparece."""
     entorno = dict(os.environ, LC_ALL="C", LANG="C")
-    code, out = run(["sudo", "-S", "-k", "-p", "", "--"] + list(comando), timeout=timeout, entrada=(clave or "") + "\n", env=entorno)
+    orden = _fuera_de_la_app(["sudo", "-S", "-k", "-p", "", "--"] + list(comando), {"LC_ALL": "C", "LANG": "C"})
+    code, out = run(orden, timeout=timeout, entrada=(clave or "") + "\n", env=entorno)
+    if code != 0 and _MARCA_NNP.search(out or ""):
+        raise RuntimeError("Linux no deja subir a administrador desde la app (marca «no new privileges») y no se pudo "
+                           "evitar con el systemd de tu usuario. Ejecuta en una terminal:\nsudo %s"
+                           % " ".join(_entre_comillas(p) for p in comando))
     if code != 0:
         if re.search(r"incorrect password|sorry, try again|password is required|no password was provided", out or "", re.I):
             raise ClaveIncorrecta("La clave no es correcta. Es la clave de tu usuario de Linux (la misma de «sudo»).")
@@ -2815,7 +2861,7 @@ def _abrir_como_admin(argumento, clave=None):
         if not r.get("ok"):
             raise RuntimeError("El ayudante no pudo completarlo: %s" % (r.get("error") or (r.get("salida") or "")[-300:]))
         return
-    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION"):
+    if shutil.which("pkexec") and not os.environ.get("XRDP_SESSION") and not _sin_privilegios_nuevos():
         code, out = run(["pkexec"] + comando, timeout=90)
         if code == 0:
             return
@@ -2849,7 +2895,8 @@ def _admin_por_terminal(comando):
     for nombre, args in terminales:
         if not shutil.which(nombre):
             continue
-        proc = subprocess.Popen([nombre] + args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(_fuera_de_la_app([nombre] + args, tuberia=False), start_new_session=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             if proc.wait(timeout=4) != 0:
                 continue          # no pudo abrir la ventana (p. ej. gnome-terminal por Escritorio remoto)
