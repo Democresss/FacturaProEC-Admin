@@ -1,0 +1,4 @@
+{"version": "2.3.16", "commit": "3371bfb596def5503521a8a9074cd450b0d17ed0", "ref": "compilar-prueba", "run": "36797591880",
+ "backend_linux": "success", "backend_windows": "success",
+ "app_linux": "success", "app_windows": "success",
+ "archivos": [{"mb":115,"nombre":"FacturaProEC-Admin-2.3.16-linux-amd64.deb"},{"mb":141,"nombre":"FacturaProEC-Admin-2.3.16-linux-x64.tar.gz"},{"mb":146,"nombre":"FacturaProEC-Admin-2.3.16-linux-x86_64.AppImage"},{"mb":114,"nombre":"FacturaProEC-Admin-2.3.16-linux-x86_64.rpm"},{"mb":96,"nombre":"FacturaProEC-Admin-2.3.16-win-x64.exe"},{"mb":0,"nombre":"latest-linux.yml"},{"mb":0,"nombre":"latest.yml"}]}

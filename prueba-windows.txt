@@ -1,0 +1,15 @@
+OK   el backend arranca y da su puerto                                      52955
+OK   sin la clave: 401 (una página web no puede usarlo)                     
+OK   con la clave de la app: 200                                            
+OK   una página web ajena no recibe permiso CORS                            400
+OK   «Servidor y túnel» revisa el equipo                                    {'instalado': True, 'corriendo': True, 'version': '29.7.2', 'sin_permiso': False, 'motor': ''}
+OK   Seguridad: las claves guardadas están cifradas                         {"ok":true,"metodo":"DPAPI de Windows (ligado a tu cuenta)","cifradas":0,"en_claro":0,"archivo":"C:\\Users\\runneradmin\
+OK   «Servidor y túnel»: progreso                                           
+OK   Servicios automáticos: lista Docker y vigilante                        ['docker', 'vigilante', 'admin']
+OK   el mismo ejecutable sirve de vigilante (--version)                     1.16.3
+OK   --ayudante es el ayudante (no levanta el servidor de la app)             ? El ayudante solo corre como servicio del sistema (root) con --uid.
+
+OK   sin BRIDGE_TOKEN el servidor de la app no arranca                      El servidor de la app solo arranca desde FacPro Server Manager (falta BRIDGE_TOKEN).
+
+
+RESULTADO: TODO OK (11/11)
