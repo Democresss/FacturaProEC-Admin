@@ -207,9 +207,11 @@ def avisar() -> Dict[str, Any]:
 def modo_linea_de_comandos(argv) -> Optional[int]:
     """El mismo ejecutable del backend sirve para el vigilante y para las tareas de administrador:
     bridge [--datos CARPETA] --vigilar | --instalar-vigilante | --quitar-vigilante | --docker-al-arrancar | --servicios
-    | --instalar-docker | --enlace CODIGO | --version."""
-    banderas = ("--vigilar", "--instalar-vigilante", "--quitar-vigilante", "--docker-al-arrancar", "--servicios", "--modo-admin",
-                "--instalar-docker", "--enlace", "--version", "--cli")
+    | --instalar-docker | --iniciar-docker | --modo-admin | --ayudante --uid N | --enlace CODIGO | --version.
+    Antes «--ayudante» e «--iniciar-docker» no estaban en la lista: el servicio de root levantaba el servidor HTTP.
+    Las banderas del ayudante salen de la misma herramienta para que no vuelva a pasar."""
+    banderas = (("--vigilar", "--instalar-vigilante", "--servicios", "--enlace", "--version", "--cli", "--analizar",
+                 "--ayudante") + tuple(fs.BANDERAS_AYUDANTE))
     if any(b in argv for b in banderas):
         return fs.main(list(argv))
     return None

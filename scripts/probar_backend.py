@@ -91,6 +91,22 @@ def main():
     version = subprocess.run(comando + ["--version"], capture_output=True, text=True, timeout=60)
     c(version.returncode == 0 and version.stdout.strip()[:1].isdigit(), "el mismo ejecutable sirve de vigilante (--version)",
       version.stdout.strip() or version.stderr[-200:])
+    sin_clave = {k: v for k, v in os.environ.items() if k != "BRIDGE_TOKEN"}
+    try:
+        ayud = subprocess.run(comando + ["--ayudante"], capture_output=True, text=True, timeout=60,
+                              env=sin_clave, encoding="utf-8", errors="replace")
+        c(ayud.returncode == 1 and "ayudante" in (ayud.stdout + ayud.stderr) and "BRIDGE_PORT" not in ayud.stdout,
+          "--ayudante es el ayudante (no levanta el servidor de la app)", (ayud.stdout + ayud.stderr)[-160:])
+    except subprocess.TimeoutExpired:
+        c(False, "--ayudante es el ayudante (no levanta el servidor de la app)", "se quedó corriendo: levantó el servidor")
+    if len(sys.argv) > 1:   # programa compilado: sin la clave de la app no hay servidor HTTP
+        try:
+            solo = subprocess.run(comando, capture_output=True, text=True, timeout=60, env=sin_clave,
+                                  encoding="utf-8", errors="replace")
+            c(solo.returncode == 2 and "BRIDGE_PORT" not in solo.stdout, "sin BRIDGE_TOKEN el servidor de la app no arranca",
+              solo.stdout[-160:])
+        except subprocess.TimeoutExpired:
+            c(False, "sin BRIDGE_TOKEN el servidor de la app no arranca", "arrancó sin clave")
     if not all(ok):
         print("\n--- salida del backend (últimas 80 líneas) ---")
         print("".join(salida[-80:]))

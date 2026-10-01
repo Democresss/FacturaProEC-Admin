@@ -666,6 +666,10 @@ def main():
     codigo = modo_linea_de_comandos(sys.argv[1:])
     if codigo is not None:
         sys.exit(codigo)
+    # El servidor HTTP es solo para la app y siempre con su clave de acceso (el programa compilado sin ella no lo abre)
+    if not _CLAVE_BRIDGE and getattr(sys, "frozen", False):
+        print("El servidor de la app solo arranca desde FacPro Server Manager (falta BRIDGE_TOKEN).", flush=True)
+        sys.exit(2)
     import uvicorn
     port = int(os.environ.get("BRIDGE_PORT", "0"))
     if port == 0:
