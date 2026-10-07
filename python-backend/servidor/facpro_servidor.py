@@ -1262,6 +1262,9 @@ def informar_archivos(minio, config=None):
 
 
 _BORE_PUERTO_OCUPADO = r"already in use|port .* not available|address in use"
+# El contenedor del túnel pregunta a DNS públicos: hay redes cuyo DNS (router, proveedor o filtro) responde que bore.pub
+# «no existe» aunque el resto de internet funcione (pasó en el servidor de Harpicorp, 7-oct-2026).
+DNS_TUNEL = ("1.1.1.1", "8.8.8.8")
 
 
 def motivo_bore(logs):
@@ -1273,7 +1276,8 @@ def motivo_bore(logs):
         return ("El túnel no respondió en 20 segundos y bore no escribió nada. Revisa que Docker tenga internet "
                 "(Docker Desktop abierto y sin errores).")
     if re.search(r"resolve|lookup|dns|name or service", detalle, re.I):
-        return "Docker no encuentra el nombre bore.pub (DNS). Revisa el internet o el DNS de Docker. Detalle: %s" % detalle
+        return ("No se encuentra el nombre bore.pub ni preguntando a los DNS públicos (1.1.1.1 y 8.8.8.8): algo en la "
+                "red bloquea el DNS. Revisa el router, el antivirus o un filtro web. Detalle: %s" % detalle)
     if re.search(r"refused|timed out|timeout|unreachable|connect|reset", detalle, re.I):
         return ("Desde este equipo no se llega a bore.pub por el puerto 7835: lo bloquea un firewall, el antivirus o la "
                 "red. Deja salir conexiones TCP a bore.pub:7835 y prueba de nuevo. Detalle: %s" % detalle)
@@ -1289,6 +1293,8 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
     intentos += [random.randint(*PUERTOS_BORE) for _ in range(5)]
     for puerto in intentos:
         args = ["run", "-d", "--name", nombre, "--network", RED, "--restart", "always"] + (extra or [])
+        for dns in DNS_TUNEL:
+            args += ["--dns", dns]
         args += [IMG_BORE, "local", str(destino_puerto), "--local-host", destino_host, "--to", BORE_HOST, "--port", str(puerto)]
         code, out = dk(*args, timeout=600)
         if code != 0:
