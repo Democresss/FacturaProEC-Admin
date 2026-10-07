@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.4"
+VERSION = "1.16.5"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -541,6 +541,28 @@ def inspeccionar(nombre, host=None):
         return json.loads(out)[0]
     except (ValueError, IndexError):
         return {}
+
+
+def claves_minio(cont, env):
+    """Usuario y clave maestra de un MinIO en Docker: de su configuración (MINIO_ROOT_USER/PASSWORD o los nombres
+    viejos), o de los archivos que indique (*_FILE, MINIO_CONFIG_ENV_FILE), que es lo que MinIO usa en ese caso."""
+    datos = {"MINIO_ROOT_USER": env.get("MINIO_ROOT_USER") or env.get("MINIO_ACCESS_KEY") or "",
+             "MINIO_ROOT_PASSWORD": env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY") or ""}
+
+    def leer_en(ruta):
+        code, out = dk("exec", cont, "cat", ruta, timeout=30)
+        return out if code == 0 else ""
+    if env.get("MINIO_CONFIG_ENV_FILE"):
+        for linea in leer_en(env["MINIO_CONFIG_ENV_FILE"]).splitlines():
+            m = re.match(r"\s*(?:export\s+)?(MINIO_ROOT_USER|MINIO_ROOT_PASSWORD)\s*=\s*[\"']?(.*?)[\"']?\s*$", linea)
+            if m and m.group(2):
+                datos[m.group(1)] = m.group(2)
+    for clave, viejo in (("MINIO_ROOT_USER", "MINIO_ACCESS_KEY"), ("MINIO_ROOT_PASSWORD", "MINIO_SECRET_KEY")):
+        ruta = env.get(clave + "_FILE") or env.get(viejo + "_FILE")
+        valor = leer_en(ruta).strip() if ruta else ""
+        if valor:
+            datos[clave] = valor
+    return {"root_usuario": datos["MINIO_ROOT_USER"], "root_clave": datos["MINIO_ROOT_PASSWORD"]}
 
 
 def env_de(info):
@@ -1208,6 +1230,10 @@ def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTUR
         for args, entrada in pasos:
             code, out = mc(*args, entrada=entrada)
             if code != 0 and not re.search(r"already|ya existe", out or "", re.I):
+                if re.search(r"signature .*does not match|InvalidAccessKeyId|access key id .*does not exist", out or "", re.I):
+                    raise RuntimeError("MinIO no aceptó el usuario y la clave maestra que tiene en su configuración de Docker: "
+                                       "tu MinIO está usando otra clave (se cambió después de crearlo, o la toma de otro lado). "
+                                       "Revisa con qué clave entras a la consola de MinIO.")
                 raise RuntimeError("MinIO: no se pudo «%s»: %s" % (" ".join(args[:3]), (out or "")[-300:]))
     finally:
         for archivo in archivos:
@@ -1289,7 +1315,11 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
     Si falla por otra cosa (firewall, DNS, sin internet) no sigue probando puertos: dice el motivo real (antes todo
     salía como «el puerto no está disponible», aunque bore.pub nunca hubiera respondido)."""
     dk("rm", "-f", nombre)
-    intentos = [preferido] if preferido else []
+    if preferido and (int(preferido) == BORE_PUERTO_CONTROL or not 1024 <= int(preferido) <= 65535):
+        log("El puerto %s no sirve para el túnel (el %d es el de control de bore.pub): se elige otro." % (preferido, BORE_PUERTO_CONTROL),
+            "aviso")
+        preferido = None
+    intentos = [int(preferido)] if preferido else []
     intentos += [random.randint(*PUERTOS_BORE) for _ in range(5)]
     for puerto in intentos:
         args = ["run", "-d", "--name", nombre, "--network", RED, "--restart", "always"] + (extra or [])
@@ -1376,49 +1406,54 @@ def configurar(opciones):
     puerto_pg = levantar_bore(C_BORE_PG, destino_host, destino_puerto, int(preferido) if preferido else None, extra_bore)
 
     # 4. MinIO (opcional)
-    minio = {}
+    minio, minio_error = {}, ""
     if opciones.get("minio"):
-        m_info = analizar_minio(contenedores_todos(), opciones.get("minio_contenedor"), config)
-        m_host = m_info.get("host") or None
-        _HILO.host = m_host        # MinIO puede estar en otro Docker: su túnel va en ese Docker
-        if m_host:
-            asegurar_red()
-        if m_info["estado"] == "no":
-            m_usuario, m_clave = "facpro", clave_segura()
-            log("Creando MinIO en Docker («%s»)…" % C_MINIO, "paso")
-            code, out = dk("run", "-d", "--name", C_MINIO, "--network", RED, "--restart", "unless-stopped",
-                           "-p", "9000:9000", "-p", "9001:9001", "-e", "MINIO_ROOT_USER=" + m_usuario,
-                           "-e", "MINIO_ROOT_PASSWORD=" + m_clave, "-v", "facpro-minio:/data",
-                           IMG_MINIO, "server", "/data", "--console-address", ":9001", timeout=900)
-            if code != 0:
-                raise RuntimeError("No se pudo crear MinIO: %s" % out[-300:])
-            m_cont = C_MINIO
-            minio = {"root_usuario": m_usuario, "root_clave": m_clave}
-            log("MinIO creado (consola en este equipo: http://localhost:9001)", "ok")
-        elif m_info["estado"] == "contenedor":
-            m_cont = m_info["contenedor"]
-            if not m_info["corriendo"]:
-                dk("start", m_cont)
-            conectar_a_red(m_cont)
-            env = env_de(inspeccionar(m_cont))
-            minio = {"root_usuario": env.get("MINIO_ROOT_USER") or env.get("MINIO_ACCESS_KEY") or "",
-                     "root_clave": env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY") or ""}
-            log("MinIO encontrado en Docker: «%s»" % m_cont, "ok")
-        else:
-            m_cont = "host.docker.internal"
-        # Por internet MinIO sale SOLO con SSL: intermediario con certificado propio delante de MinIO (no se toca)
-        extra_host = ["--add-host", "host.docker.internal:host-gateway"] if (m_cont == "host.docker.internal" and not ES_WINDOWS) else None
-        ca_pem = certificado_minio()
-        intermediario_ssl_minio(m_cont, extra_host)
-        puerto_minio = levantar_bore(C_BORE_MINIO, C_MINIO_TLS, 9443, config.get("bore_puerto_minio"))
-        if not (minio.get("root_usuario") and minio.get("root_clave")):
-            raise RuntimeError("No encontré la clave maestra de MinIO en la configuración del contenedor: no puedo crear el "
-                               "usuario de FacturaPro. (El túnel con SSL quedó listo.)")
-        m_clave_app = usuario_minio_propio(m_cont, minio["root_usuario"], minio["root_clave"])
-        minio = {"endpoint": "https://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont,
-                 "docker_host": m_host or "", "usuario": USUARIO_FACTURAPRO, "clave": m_clave_app,
-                 "bucket": BUCKET_FACTURAPRO, "ca_pem": ca_pem}
-        _HILO.host = None
+        # Si MinIO falla, PostgreSQL se configura y se manda a FacturaPro igual: su clave ya cambió arriba y, si se
+        # cortara aquí, FacturaPro se quedaría con la vieja (y sin base).
+        try:
+            m_info = analizar_minio(contenedores_todos(), opciones.get("minio_contenedor"), config)
+            m_host = m_info.get("host") or None
+            _HILO.host = m_host        # MinIO puede estar en otro Docker: su túnel va en ese Docker
+            if m_host:
+                asegurar_red()
+            if m_info["estado"] == "no":
+                m_usuario, m_clave = "facpro", clave_segura()
+                log("Creando MinIO en Docker («%s»)…" % C_MINIO, "paso")
+                code, out = dk("run", "-d", "--name", C_MINIO, "--network", RED, "--restart", "unless-stopped",
+                               "-p", "9000:9000", "-p", "9001:9001", "-e", "MINIO_ROOT_USER=" + m_usuario,
+                               "-e", "MINIO_ROOT_PASSWORD=" + m_clave, "-v", "facpro-minio:/data",
+                               IMG_MINIO, "server", "/data", "--console-address", ":9001", timeout=900)
+                if code != 0:
+                    raise RuntimeError("No se pudo crear MinIO: %s" % out[-300:])
+                m_cont = C_MINIO
+                minio = {"root_usuario": m_usuario, "root_clave": m_clave}
+                log("MinIO creado (consola en este equipo: http://localhost:9001)", "ok")
+            elif m_info["estado"] == "contenedor":
+                m_cont = m_info["contenedor"]
+                if not m_info["corriendo"]:
+                    dk("start", m_cont)
+                conectar_a_red(m_cont)
+                minio = claves_minio(m_cont, env_de(inspeccionar(m_cont)))
+                log("MinIO encontrado en Docker: «%s»" % m_cont, "ok")
+            else:
+                m_cont = "host.docker.internal"
+            # Por internet MinIO sale SOLO con SSL: intermediario con certificado propio delante de MinIO (no se toca)
+            extra_host = ["--add-host", "host.docker.internal:host-gateway"] if (m_cont == "host.docker.internal" and not ES_WINDOWS) else None
+            ca_pem = certificado_minio()
+            intermediario_ssl_minio(m_cont, extra_host)
+            puerto_minio = levantar_bore(C_BORE_MINIO, C_MINIO_TLS, 9443, config.get("bore_puerto_minio"))
+            if not (minio.get("root_usuario") and minio.get("root_clave")):
+                raise RuntimeError("No encontré la clave maestra de MinIO en la configuración del contenedor: no puedo crear el "
+                                   "usuario de FacturaPro. (El túnel con SSL quedó listo.)")
+            m_clave_app = usuario_minio_propio(m_cont, minio["root_usuario"], minio["root_clave"])
+            minio = {"endpoint": "https://%s:%d" % (BORE_HOST, puerto_minio), "puerto": puerto_minio, "contenedor": m_cont,
+                     "docker_host": m_host or "", "usuario": USUARIO_FACTURAPRO, "clave": m_clave_app,
+                     "bucket": BUCKET_FACTURAPRO, "ca_pem": ca_pem}
+        except Exception as e:  # noqa: BLE001
+            minio, minio_error = {}, str(e)
+            log("MinIO quedó pendiente (PostgreSQL sigue): %s" % e, "error")
+        finally:
+            _HILO.host = None
 
     # 5. Prueba desde internet
     log("Probando la conexión desde internet (%s:%d)…" % (BORE_HOST, puerto_pg), "paso")
@@ -1454,7 +1489,10 @@ def configurar(opciones):
     if not ES_WINDOWS:
         os.chmod(os.path.join(carpeta_datos(), "conexion.txt"), 0o600)
     _devolver_dueno(os.path.join(carpeta_datos(), "conexion.txt"))
-    log("Todo listo. Configuración guardada en %s" % ruta, "ok")
+    if minio_error:
+        log("PostgreSQL listo; MinIO quedó pendiente (mira el aviso de arriba). Configuración guardada en %s" % ruta, "aviso")
+    else:
+        log("Todo listo. Configuración guardada en %s" % ruta, "ok")
     enviada = None
     if nuevo.get("enlace_facturapro"):
         # con el código de enlace, FacturaPro recibe la conexión completa: no hay que pegar nada
@@ -1468,7 +1506,7 @@ def configurar(opciones):
         log("Sin código de enlace: copia la dirección de abajo en FacturaPro (o guarda el código y vuelve a «Configurar todo»).", "aviso")
     minio_pantalla = {k: v for k, v in (minio or {}).items() if k not in ("clave", "root_clave", "ca_pem")} or None
     return {"url": url, "ssl": en_linea is True, "puerto": puerto_pg, "base": base, "usuario": usuario, "minio": minio_pantalla,
-            "facturapro": URL_FACTURAPRO, "enviada": bool(enviada)}
+            "facturapro": URL_FACTURAPRO, "enviada": bool(enviada), "minio_error": minio_error}
 
 
 # ─────────────────────────────── enlace con FacturaPro y vigilante del túnel ───────────────────────────────
