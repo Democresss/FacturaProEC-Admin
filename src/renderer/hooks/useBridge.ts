@@ -19,6 +19,7 @@ export function useBridge() {
   const [state, setState] = useState<BridgeState>('connecting');
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [detalle, setDetalle] = useState<{ lineas: string[]; archivo: string } | null>(null);
   const urlRef = useRef<string | null>(null);
   const tokenRef = useRef<string>('');
 
@@ -52,11 +53,21 @@ export function useBridge() {
         } catch (e) {
           // ignore
         }
+        // Si el servidor interno ya falló (también tras reintentar), mostrar el motivo sin esperar más
+        try {
+          const fallo = await ea.bridge.getError?.();
+          if (fallo && !cancelled) {
+            setError(fallo.error);
+            setDetalle({ lineas: fallo.lineas || [], archivo: fallo.archivo || '' });
+            setState('error');
+            return;
+          }
+        } catch { /* noop */ }
         await new Promise(r => setTimeout(r, 500));
       }
 
       if (!cancelled) {
-        setError('No se pudo conectar al backend Python');
+        setError('El servidor interno de la app no respondió.');
         setState('error');
       }
     }
@@ -91,5 +102,5 @@ export function useBridge() {
     }
   }, [baseUrl]);
 
-  return { state, error, call };
+  return { state, error, detalle, call };
 }

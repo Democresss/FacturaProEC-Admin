@@ -32,7 +32,7 @@ const TABS: TabDef[] = [
 ];
 
 function AppInner() {
-  const { state, error, call } = useBridge();
+  const { state, error, detalle, call } = useBridge();
   const { mode, effective, change } = useTheme();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<TabId>('servidor');
@@ -64,8 +64,8 @@ function AppInner() {
     return (
       <div className="empty" style={{ height: '100vh' }}>
         <div className="empty-icon">⏳</div>
-        <div>Conectando con el backend Python…</div>
-        <div className="muted fs-12 mt-8">Si tarda más de 30s, revisa que Python esté en el PATH.</div>
+        <div>Arrancando el servidor interno de la app…</div>
+        <div className="muted fs-12 mt-8">Suele tardar unos segundos (la primera vez, el antivirus puede revisarlo).</div>
       </div>
     );
   }
@@ -74,9 +74,17 @@ function AppInner() {
     return (
       <div className="empty" style={{ height: '100vh' }}>
         <div className="empty-icon">⚠</div>
-        <div>Error de conexión con el backend</div>
+        <div>No arrancó el servidor interno de la app</div>
         <div className="muted fs-12 mt-8">{error}</div>
-        <button className="btn btn-primary mt-16" onClick={() => location.reload()}>Reintentar</button>
+        {detalle?.lineas?.length ? (
+          <pre className="fs-12 mt-8" style={{ maxWidth: 760, maxHeight: 220, overflow: 'auto', textAlign: 'left',
+            whiteSpace: 'pre-wrap', opacity: 0.85 }}>{detalle.lineas.join('\n')}</pre>
+        ) : null}
+        {detalle?.archivo ? <div className="muted fs-12 mt-8">Registro completo: {detalle.archivo}</div> : null}
+        <button className="btn btn-primary mt-16" onClick={async () => {
+          await (window as any).electronAPI?.bridge?.restart?.();
+          location.reload();
+        }}>Reintentar</button>
       </div>
     );
   }

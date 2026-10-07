@@ -5,6 +5,9 @@ interface Window {
     bridge: {
       getPort: () => Promise<number | null>;
       getUrl: () => Promise<string | null>;
+      getToken?: () => Promise<string>;
+      getError?: () => Promise<{ error: string; lineas: string[]; archivo: string } | null>;
+      restart?: () => Promise<{ ok: boolean; error: string | null }>;
     };
     theme: {
       set: (mode: 'system' | 'light' | 'dark') => Promise<{ mode: string; effective: string }>;

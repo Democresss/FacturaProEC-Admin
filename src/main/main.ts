@@ -20,6 +20,17 @@ import * as crypto from 'crypto';
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let bridgeProcess: ChildProcess | null = null;
+// Lo que el servidor interno escribió y por qué no arrancó: se muestra en la ventana y queda en bridge.log
+let bridgeLineas: string[] = [];
+let bridgeFallo: string | null = null;
+function bridgeLogPath(): string {
+  return path.join(app.getPath('userData'), 'bridge.log');
+}
+function anotarBridge(texto: string) {
+  const lineas = texto.split(/\r?\n/).filter(l => l.trim());
+  bridgeLineas = bridgeLineas.concat(lineas).slice(-60);
+  try { fs.appendFileSync(bridgeLogPath(), lineas.map(l => `${new Date().toISOString()} ${l}`).join('\n') + '\n'); } catch { /* noop */ }
+}
 let bridgePort: number | null = null;
 let isQuitting = false;
 let actualizacionLista = false;   // descargada: se instala en cuanto la app quede en segundo plano
@@ -129,6 +140,11 @@ function startBridge(): Promise<number> {
     const pyExe = frozen || resolvePython();
     const args = frozen ? [] : [script];
     console.log(`[main] Lanzando bridge: ${pyExe} ${args.join(' ')}`);
+    anotarBridge(`[app] Lanzando ${pyExe} ${args.join(' ')} (administrador: ${esAdministradorWindows() ? 'sí' : 'no'})`);
+    if (frozen && !fs.existsSync(frozen)) {
+      reject(new Error(`No existe ${frozen}: reinstala FacPro Server Manager.`));
+      return;
+    }
 
     bridgeProcess = spawn(pyExe, args, {
       // El cwd DEBE existir físicamente en el FS. Si el script está dentro del
@@ -146,13 +162,14 @@ function startBridge(): Promise<number> {
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        reject(new Error('Timeout esperando BRIDGE_PORT del backend'));
+        reject(new Error('El servidor interno de la app no respondió en 45 segundos (el antivirus puede estar revisándolo o bloqueándolo).'));
       }
-    }, 30000);
+    }, 45000);
 
     bridgeProcess.stdout?.on('data', (data: Buffer) => {
       const text = data.toString();
       process.stdout.write(`[bridge] ${text}`);
+      anotarBridge(text);
       const m = text.match(/BRIDGE_PORT=(\d+)/);
       if (m && !resolved) {
         resolved = true;
@@ -165,10 +182,12 @@ function startBridge(): Promise<number> {
 
     bridgeProcess.stderr?.on('data', (data: Buffer) => {
       process.stderr.write(`[bridge:err] ${data}`);
+      anotarBridge(data.toString());
     });
 
     bridgeProcess.on('exit', (code) => {
       console.log(`[main] Bridge terminó con código ${code}`);
+      anotarBridge(`[app] El servidor interno terminó (código ${code})`);
       bridgeProcess = null;
       bridgePort = null;
       if (!resolved) {
@@ -180,6 +199,7 @@ function startBridge(): Promise<number> {
 
     bridgeProcess.on('error', (err) => {
       console.error('[main] Error lanzando bridge:', err);
+      anotarBridge(`[app] No se pudo lanzar: ${err?.message || err}`);
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
@@ -187,6 +207,35 @@ function startBridge(): Promise<number> {
       }
     });
   });
+}
+
+/** ¿La app corre con «Ejecutar como administrador»? (solo para el diagnóstico) */
+function esAdministradorWindows(): boolean {
+  if (process.platform !== 'win32') return false;
+  try {
+    // Solo un proceso elevado puede listar esta carpeta del sistema
+    fs.readdirSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'config', 'systemprofile'));
+    return true;
+  } catch { return false; }
+}
+
+/** Arranca el servidor interno; si falla, lo intenta una vez más y guarda el motivo para mostrarlo. */
+async function arrancarBridge(): Promise<number | null> {
+  bridgeFallo = null;
+  try { fs.writeFileSync(bridgeLogPath(), ''); } catch { /* noop */ }
+  for (let intento = 1; intento <= 2; intento++) {
+    try {
+      const puerto = await startBridge();
+      bridgeFallo = null;
+      return puerto;
+    } catch (err: any) {
+      bridgeFallo = String(err?.message || err);
+      anotarBridge(`[app] Intento ${intento}: ${bridgeFallo}`);
+      stopBridge();
+      if (intento === 1) await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  return null;
 }
 
 function stopBridge() {
@@ -443,6 +492,13 @@ function setupIpc() {
   ipcMain.handle('bridge:get-port', () => bridgePort);
   ipcMain.handle('bridge:get-url', () => bridgePort ? `http://127.0.0.1:${bridgePort}` : null);
   ipcMain.handle('bridge:get-token', () => BRIDGE_TOKEN);
+  ipcMain.handle('bridge:get-error', () => bridgeFallo
+    ? { error: bridgeFallo, lineas: bridgeLineas.slice(-15), archivo: bridgeLogPath() } : null);
+  ipcMain.handle('bridge:restart', async () => {
+    stopBridge();
+    bridgePort = await arrancarBridge();
+    return { ok: !!bridgePort, error: bridgeFallo };
+  });
 
   ipcMain.handle('theme:set', (_e, mode: 'system'|'light'|'dark') => {
     setTheme(mode);
@@ -678,13 +734,9 @@ function setupAutoUpdater() {
 /* ───────────── App lifecycle ───────────── */
 
 app.whenReady().then(async () => {
-  try {
-    bridgePort = await startBridge();
-    console.log(`[main] Bridge arrancó en puerto ${bridgePort}`);
-  } catch (err) {
-    console.error('[main] No se pudo arrancar el backend Python:', err);
-    // Mostrar ventana de error al renderer de todas formas
-  }
+  bridgePort = await arrancarBridge();
+  if (bridgePort) console.log(`[main] Bridge arrancó en puerto ${bridgePort}`);
+  else console.error('[main] No se pudo arrancar el backend:', bridgeFallo);
 
   setupIpc();
   setupAutoUpdater();

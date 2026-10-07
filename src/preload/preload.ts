@@ -11,6 +11,8 @@ const api = {
     getPort: (): Promise<number | null> => ipcRenderer.invoke('bridge:get-port'),
     getUrl: (): Promise<string | null> => ipcRenderer.invoke('bridge:get-url'),
     getToken: (): Promise<string> => ipcRenderer.invoke('bridge:get-token'),
+    getError: (): Promise<{ error: string; lineas: string[]; archivo: string } | null> => ipcRenderer.invoke('bridge:get-error'),
+    restart: (): Promise<{ ok: boolean; error: string | null }> => ipcRenderer.invoke('bridge:restart'),
   },
   theme: {
     set: (mode: 'system' | 'light' | 'dark') =>
