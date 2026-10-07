@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.7"
+VERSION = "1.16.8"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -630,6 +630,11 @@ def abrir_docker_desktop():
             subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
             return True
         return False
+    if (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=15)[1] or "").strip() == "active":
+        # El servicio está encendido pero su Docker no responde (pasó en la .71 tras días encendido: «500 Internal Server
+        # Error»). Abrir el programa no hace nada («running under systemd»): hay que reiniciar el servicio.
+        log("Docker Desktop está encendido pero su Docker no responde: reiniciándolo…", "aviso")
+        return run(["systemctl", "--user", "restart", "docker-desktop"], timeout=180)[0] == 0
     hay_pantalla = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     if hay_pantalla and os.path.exists(DOCKER_DESKTOP_LINUX) and not (hasattr(os, "geteuid") and os.geteuid() == 0):
         subprocess.Popen([DOCKER_DESKTOP_LINUX], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
