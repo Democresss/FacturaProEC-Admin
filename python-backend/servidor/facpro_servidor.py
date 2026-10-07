@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.9"
+VERSION = "1.16.10"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -464,7 +464,10 @@ def docker_estado():
         return {"instalado": False, "corriendo": False, "version": ""}
     code, out = dk("info", "--format", "{{.ServerVersion}}", timeout=30)
     sin_permiso = code != 0 and "permission denied" in out.lower()
-    return {"instalado": True, "corriendo": code == 0, "version": out.splitlines()[0] if code == 0 and out else "",
+    version = (out or "").strip().splitlines()[0].strip() if (out or "").strip() else ""
+    # Docker Desktop con su motor caído responde «500 Internal Server Error»: eso no es «encendido»
+    corriendo = code == 0 and bool(version) and not re.search(r"error|cannot connect|internal server", out or "", re.I)
+    return {"instalado": True, "corriendo": corriendo, "version": version if corriendo else "",
             "sin_permiso": sin_permiso, "motor": _MOTOR["nombre"], "ocupado": code == 124}
 
 
@@ -622,6 +625,24 @@ def conectar_a_red(nombre):
     log("«%s» conectado a la red «%s» (no se modificó nada más del contenedor)" % (nombre, RED), "ok")
 
 
+def _env_usuario():
+    """Entorno para «systemctl --user» aunque se ejecute desde un servicio (sin la sesión del usuario)."""
+    env = dict(os.environ)
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        return env
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % uid)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/%d/bus" % uid)
+    return env
+
+
+#: Docker Desktop caído: desde cuándo (lo ve el vigilante) y el último reinicio automático
+_DD_CAIDO = {"desde": None, "reinicio": 0.0}
+DD_CAIDO_ANTES_DE_REINICIAR = 180      # 3 min caído de verdad (no lento)
+DD_REINICIO_COMO_MUCHO_CADA = 1800     # una vez cada 30 min
+
+
 def abrir_docker_desktop(reiniciar_colgado=False):
     """Abre Docker Desktop CON su ventana (en Linux, «systemctl --user start docker-desktop» lo encendía sin ventana y
     tras reiniciar quedaba escondido). True si se pudo lanzar. Reiniciarlo cuando está encendido pero colgado SOLO si
@@ -631,7 +652,7 @@ def abrir_docker_desktop(reiniciar_colgado=False):
             subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
             return True
         return False
-    if (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=15)[1] or "").strip() == "active":
+    if (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=15, env=_env_usuario())[1] or "").strip() == "active":
         # Encendido pero su Docker no responde (pasó en la .71: «500 Internal Server Error»). Abrir el programa no hace
         # nada («running under systemd»): hay que reiniciar el servicio, pero solo si el usuario lo pidió.
         if not reiniciar_colgado:
@@ -639,13 +660,27 @@ def abrir_docker_desktop(reiniciar_colgado=False):
                 "pulsa «Encender Docker» para reiniciarlo.", "aviso")
             return False
         log("Docker Desktop está encendido pero su Docker no responde: reiniciándolo…", "aviso")
-        return run(["systemctl", "--user", "restart", "docker-desktop"], timeout=180)[0] == 0
+        return run(["systemctl", "--user", "restart", "docker-desktop"], timeout=180, env=_env_usuario())[0] == 0
     hay_pantalla = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     if hay_pantalla and os.path.exists(DOCKER_DESKTOP_LINUX) and not (hasattr(os, "geteuid") and os.geteuid() == 0):
         subprocess.Popen([DOCKER_DESKTOP_LINUX], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         return True
-    return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)[0] == 0
+    return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60, env=_env_usuario())[0] == 0
+
+
+def _reiniciar_dd_por_vigilante(ahora=None):
+    """El vigilante solo reinicia un Docker Desktop CAÍDO (no lento) que lleva 3 min así, y como mucho cada 30 min."""
+    ahora = ahora or time.time()
+    desde = _DD_CAIDO["desde"] = _DD_CAIDO["desde"] or ahora
+    if ahora - desde < DD_CAIDO_ANTES_DE_REINICIAR:
+        return False
+    if ahora - _DD_CAIDO["reinicio"] < DD_REINICIO_COMO_MUCHO_CADA:
+        return False
+    _DD_CAIDO["reinicio"] = ahora
+    log("Docker Desktop lleva %d min sin funcionar (error del motor, no lentitud): se reinicia una vez (como mucho cada "
+        "30 min)." % int((ahora - desde) // 60), "aviso")
+    return True
 
 
 def iniciar_docker(manual=False):
@@ -654,6 +689,7 @@ def iniciar_docker(manual=False):
     responder no se toca nada (antes, en la 2.3.21, lo reiniciaba cada minuto y paraba todos los contenedores)."""
     estado = docker_estado()
     if estado["corriendo"]:
+        _DD_CAIDO["desde"] = None
         return True
     if estado.get("ocupado") and not manual:
         log("Docker tarda en responder (ocupado): se espera, no se toca.", "aviso")
@@ -662,7 +698,8 @@ def iniciar_docker(manual=False):
     if ES_WINDOWS:
         abrir_docker_desktop()
     elif _MOTOR["nombre"] == "Docker Desktop":
-        if not abrir_docker_desktop(reiniciar_colgado=manual) and not manual:
+        reiniciar = manual or _reiniciar_dd_por_vigilante()
+        if not abrir_docker_desktop(reiniciar_colgado=reiniciar) and not reiniciar:
             return False
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
         ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
