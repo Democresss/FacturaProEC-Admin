@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.6"
+VERSION = "1.16.7"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -256,8 +256,14 @@ def sin_secretos(config):
 
 # ─────────────────────────────── Docker ───────────────────────────────
 
-RUTAS_DOCKER_WINDOWS = (r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",)
-DOCKER_DESKTOP_EXE = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+_CARPETAS_DOCKER_WINDOWS = [os.path.join(os.environ.get(v) or "", "Docker", "Docker")
+                            for v in ("ProgramFiles", "ProgramW6432")] + [
+    os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Docker", "Docker"), r"C:\Program Files\Docker\Docker"]
+RUTAS_DOCKER_WINDOWS = tuple(dict.fromkeys(os.path.join(c, "resources", "bin", "docker.exe") for c in _CARPETAS_DOCKER_WINDOWS))
+DOCKER_DESKTOP_EXE = next((os.path.join(c, "Docker Desktop.exe") for c in _CARPETAS_DOCKER_WINDOWS
+                           if os.path.exists(os.path.join(c, "Docker Desktop.exe"))), r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
+# Linux: el programa de Docker Desktop (abre su ventana y enciende su Docker)
+DOCKER_DESKTOP_LINUX = "/opt/docker-desktop/bin/docker-desktop"
 
 
 _MOTOR = {"elegido": False, "nombre": ""}
@@ -286,12 +292,16 @@ def _motores_candidatos():
         casa, uid = datos.pw_dir, datos.pw_uid
     except Exception:
         casa, uid = os.path.expanduser("~"), os.getuid() if hasattr(os, "getuid") else 0
+    desktop = os.path.join(casa, ".docker", "desktop", "docker.sock")
     candidatos = [("Docker del sistema (el de «sudo docker»)", "/var/run/docker.sock"),
-                  ("Docker Desktop", os.path.join(casa, ".docker", "desktop", "docker.sock")),
+                  ("Docker Desktop", desktop),
                   ("Docker del usuario (sin root)", "/run/user/%d/docker.sock" % uid)]
     vistos, salida = set(), []
     for n, p in candidatos:
-        if os.path.exists(p) and os.path.realpath(p) not in vistos:
+        # Docker Desktop apagado (después de reiniciar) no tiene socket, pero está instalado: se lista igual para que
+        # el elegido no se pierda y se pueda encender (antes la app se pasaba al Docker del sistema, vacío)
+        existe = os.path.exists(p) or (p == desktop and os.path.exists(DOCKER_DESKTOP_LINUX))
+        if existe and os.path.realpath(p) not in vistos:
             vistos.add(os.path.realpath(p))
             salida.append((n, "unix://" + p))
     return salida
@@ -382,10 +392,18 @@ def elegir_docker():
         n = _contar_contenedores(host)
         if n > cuantos or (n >= 0 and cuantos < 0):
             mejor, cuantos = (nombre, host), n
+    desktop = next(((n, h) for n, h in candidatos if n == "Docker Desktop"), None)
+    if desktop and cuantos <= 0 and _contar_contenedores(desktop[1]) < 0 and os.path.exists(DOCKER_DESKTOP_LINUX):
+        # Docker Desktop apagado (recién reiniciado) y el resto vacío: tus contenedores están en Docker Desktop
+        mejor = desktop
     if mejor:
         os.environ["DOCKER_HOST"] = mejor[1]
         _MOTOR["nombre"] = mejor[0]
         log("Se usa %s (ahí están tus contenedores)." % mejor[0], "ok")
+        if cuantos > 0:   # que después de reiniciar se use el mismo, aunque esté apagado
+            config = leer_config()
+            config.setdefault("docker_host", mejor[1])
+            guardar_config(config)
 
 
 def docker_bin():
@@ -604,21 +622,36 @@ def conectar_a_red(nombre):
     log("«%s» conectado a la red «%s» (no se modificó nada más del contenedor)" % (nombre, RED), "ok")
 
 
+def abrir_docker_desktop():
+    """Abre Docker Desktop CON su ventana (en Linux, «systemctl --user start docker-desktop» lo encendía sin ventana y
+    tras reiniciar quedaba escondido). True si se pudo lanzar."""
+    if ES_WINDOWS:
+        if os.path.exists(DOCKER_DESKTOP_EXE):
+            subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
+            return True
+        return False
+    hay_pantalla = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if hay_pantalla and os.path.exists(DOCKER_DESKTOP_LINUX) and not (hasattr(os, "geteuid") and os.geteuid() == 0):
+        subprocess.Popen([DOCKER_DESKTOP_LINUX], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)[0] == 0
+
+
 def iniciar_docker():
     """Enciende Docker si está instalado pero apagado."""
     if docker_estado()["corriendo"]:
         return True
     log("Docker está apagado: encendiéndolo…", "paso")
     if ES_WINDOWS:
-        if os.path.exists(DOCKER_DESKTOP_EXE):
-            subprocess.Popen([DOCKER_DESKTOP_EXE])
+        abrir_docker_desktop()
     elif _MOTOR["nombre"] == "Docker Desktop":
-        run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)
+        abrir_docker_desktop()
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
         ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
     else:
         run(["systemctl", "start", "docker"], timeout=60)
-    for _ in range(45):
+    for _ in range(90 if _MOTOR["nombre"] == "Docker Desktop" or ES_WINDOWS else 45):  # Docker Desktop tarda más
         time.sleep(2)
         if docker_estado()["corriendo"]:
             log("Docker encendido", "ok")
@@ -1233,10 +1266,15 @@ def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTUR
 
         def mc(*args, entrada=None):
             return dk(*(prefijo + list(args)), timeout=600, entrada=entrada)
-        pasos = [(("mb", "--ignore-existing", "l/" + bucket), None),
-                 (("admin", "user", "add", "l", USUARIO_FACTURAPRO, clave), None),
-                 (("admin", "policy", "create", "l", "facturapro-archivos", "/dev/stdin"), politica),
-                 (("admin", "policy", "attach", "l", "facturapro-archivos", "--user", USUARIO_FACTURAPRO), None)]
+        pasos = []
+        if mc("stat", "l/" + bucket)[0] == 0:
+            log("MinIO: el bucket «%s» ya existía; se usa tal cual (no se toca lo que tiene)." % bucket, "ok")
+        else:
+            pasos.append((("mb", "--ignore-existing", "l/" + bucket), None))
+        pasos += [
+            (("admin", "user", "add", "l", USUARIO_FACTURAPRO, clave), None),
+            (("admin", "policy", "create", "l", "facturapro-archivos", "/dev/stdin"), politica),
+            (("admin", "policy", "attach", "l", "facturapro-archivos", "--user", USUARIO_FACTURAPRO), None)]
         for args, entrada in pasos:
             code, out = mc(*args, entrada=entrada)
             if code != 0 and not re.search(r"already|ya existe", out or "", re.I):
