@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.10"
+VERSION = "1.16.11"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -385,6 +385,12 @@ def elegir_docker():
                 os.environ["DOCKER_HOST"] = host
                 _MOTOR["nombre"] = nombre
                 return
+        if guardado.endswith("/.docker/desktop/docker.sock"):
+            # El Docker Desktop de tu usuario, visto desde el vigilante del sistema (root): ese socket no está entre
+            # los de root. Se usa igual y nunca se enciende el Docker del sistema en su lugar.
+            os.environ["DOCKER_HOST"] = guardado
+            _MOTOR["nombre"] = "Docker Desktop"
+            return
     if not candidatos:
         return
     mejor, cuantos = None, _contar_contenedores()
@@ -464,9 +470,11 @@ def docker_estado():
         return {"instalado": False, "corriendo": False, "version": ""}
     code, out = dk("info", "--format", "{{.ServerVersion}}", timeout=30)
     sin_permiso = code != 0 and "permission denied" in out.lower()
-    version = (out or "").strip().splitlines()[0].strip() if (out or "").strip() else ""
-    # Docker Desktop con su motor caído responde «500 Internal Server Error»: eso no es «encendido»
-    corriendo = code == 0 and bool(version) and not re.search(r"error|cannot connect|internal server", out or "", re.I)
+    # Encendido = devolvió su versión (p. ej. «28.4.0»). Docker Desktop con el motor caído responde «500 Internal
+    # Server Error»; y una advertencia cualquiera con la palabra «error» NO debe darlo por caído.
+    versiones = [l.strip() for l in (out or "").splitlines() if re.match(r"^\d+\.\d+", l.strip())]
+    version = versiones[0] if versiones else ""
+    corriendo = code == 0 and bool(version)
     return {"instalado": True, "corriendo": corriendo, "version": version if corriendo else "",
             "sin_permiso": sin_permiso, "motor": _MOTOR["nombre"], "ocupado": code == 124}
 
@@ -639,8 +647,7 @@ def _env_usuario():
 
 #: Docker Desktop caído: desde cuándo (lo ve el vigilante) y el último reinicio automático
 _DD_CAIDO = {"desde": None, "reinicio": 0.0}
-DD_CAIDO_ANTES_DE_REINICIAR = 180      # 3 min caído de verdad (no lento)
-DD_REINICIO_COMO_MUCHO_CADA = 1800     # una vez cada 30 min
+DD_REINICIO_COMO_MUCHO_CADA = 1800     # el aviso de «Docker caído», como mucho cada 30 min
 
 
 def abrir_docker_desktop(reiniciar_colgado=False):
@@ -669,18 +676,16 @@ def abrir_docker_desktop(reiniciar_colgado=False):
     return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60, env=_env_usuario())[0] == 0
 
 
-def _reiniciar_dd_por_vigilante(ahora=None):
-    """El vigilante solo reinicia un Docker Desktop CAÍDO (no lento) que lleva 3 min así, y como mucho cada 30 min."""
+def _avisar_docker_caido(ahora=None):
+    """Docker Desktop no responde: se avisa (una vez cada 30 min) en vez de reiniciarlo. La app nunca reinicia ni
+    apaga Docker por su cuenta; para reiniciarlo está el botón «Encender Docker»."""
     ahora = ahora or time.time()
-    desde = _DD_CAIDO["desde"] = _DD_CAIDO["desde"] or ahora
-    if ahora - desde < DD_CAIDO_ANTES_DE_REINICIAR:
-        return False
+    _DD_CAIDO["desde"] = _DD_CAIDO["desde"] or ahora
     if ahora - _DD_CAIDO["reinicio"] < DD_REINICIO_COMO_MUCHO_CADA:
-        return False
+        return
     _DD_CAIDO["reinicio"] = ahora
-    log("Docker Desktop lleva %d min sin funcionar (error del motor, no lentitud): se reinicia una vez (como mucho cada "
-        "30 min)." % int((ahora - desde) // 60), "aviso")
-    return True
+    evento("Docker Desktop no responde (su motor está caído). La app no lo reinicia sola: pulsa «Encender Docker» o "
+           "reinícialo tú (systemctl --user restart docker-desktop).", "error")
 
 
 def iniciar_docker(manual=False):
@@ -698,8 +703,9 @@ def iniciar_docker(manual=False):
     if ES_WINDOWS:
         abrir_docker_desktop()
     elif _MOTOR["nombre"] == "Docker Desktop":
-        reiniciar = manual or _reiniciar_dd_por_vigilante()
-        if not abrir_docker_desktop(reiniciar_colgado=reiniciar) and not reiniciar:
+        # Nunca se reinicia solo (lo pidió el usuario: la app no debe cerrar Docker). Caído: se avisa.
+        if not abrir_docker_desktop(reiniciar_colgado=manual) and not manual:
+            _avisar_docker_caido()
             return False
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
         ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
