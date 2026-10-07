@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.5"
+VERSION = "1.16.6"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -550,6 +550,9 @@ def claves_minio(cont, env):
              "MINIO_ROOT_PASSWORD": env.get("MINIO_ROOT_PASSWORD") or env.get("MINIO_SECRET_KEY") or ""}
 
     def leer_en(ruta):
+        # La imagen oficial trae *_FILE con nombres relativos («access_key», «config.env»): son de /run/secrets
+        if not ruta.startswith("/"):
+            ruta = "/run/secrets/" + ruta
         code, out = dk("exec", cont, "cat", ruta, timeout=30)
         return out if code == 0 else ""
     if env.get("MINIO_CONFIG_ENV_FILE"):
@@ -1194,10 +1197,17 @@ def usuario_minio_propio(destino, root_usuario, root_clave, bucket=BUCKET_FACTUR
     os.makedirs(carpeta_datos(), exist_ok=True)
     archivos = []
 
+    # mc lee MC_HOST con una expresión regular y usa el usuario y la clave TAL CUAL (no decodifica %xx): codificarlos
+    # cambiaba la clave («!» → «%21») y MinIO respondía «signature does not match». Lo único que no admite es «:» en
+    # el usuario o en la clave (lo tomaría como separador) y saltos de línea (romperían el archivo).
+    if ":" in root_usuario or ":" in root_clave or "\n" in root_usuario + root_clave:
+        raise RuntimeError("La clave maestra de MinIO tiene «:» o saltos de línea y el programa mc no la puede usar. "
+                           "Cámbiala en tu MinIO (sin «:») y vuelve a «Configurar todo».")
+
     def archivo_mc(servidor):
         archivo = os.path.join(carpeta_datos(), ".mc-%d-%d.env" % (os.getpid(), len(archivos)))
         with open(archivo, "w", encoding="utf-8") as f:
-            f.write("MC_HOST_l=http://%s:%s@%s:9000\n" % (quote(root_usuario, safe=""), quote(root_clave, safe=""), servidor))
+            f.write("MC_HOST_l=http://%s:%s@%s:9000\n" % (root_usuario, root_clave, servidor))
         if not ES_WINDOWS:
             os.chmod(archivo, 0o600)
         archivos.append(archivo)
