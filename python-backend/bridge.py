@@ -80,13 +80,13 @@ _guardian_stop = threading.Event()
 
 # ── Guardian loop (definido antes del lifespan que lo arranca) ─────
 def _guardian_loop():
-    """Loop de vigilancia (cada 5s) en hilo daemon."""
+    """Loop de vigilancia (cada 15 s; antes cada 5 s lanzaba netstat/ss sin parar) en hilo daemon."""
     while not _guardian_stop.is_set():
         try:
             _guardian.scan()
         except Exception as e:
             logger.warning(f"guardian scan: {e}")
-        _guardian_stop.wait(5.0)
+        _guardian_stop.wait(15.0)
 
 
 # ── Lifespan (reemplaza on_event startup/shutdown) ────────────────

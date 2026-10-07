@@ -56,6 +56,23 @@ class ScanResult:
     bruteforce_pairs: list[tuple[str, int]] = field(default_factory=list)
 
 
+def es_de_internet(ip: str) -> bool:
+    """True solo para IPs públicas. Las de la red interna (192.168.x, 10.x, 172.16-31.x), Docker/WSL, loopback,
+    link-local y 100.64/10 no son un intruso: antes disparaban el cerrojo y borraban las reglas del firewall."""
+    import ipaddress
+    try:
+        d = ipaddress.ip_address(str(ip or "").split("%")[0].strip("[]"))
+    except ValueError:
+        return False
+    if getattr(d, "ipv4_mapped", None):
+        d = d.ipv4_mapped
+    if d.is_private or d.is_loopback or d.is_link_local or d.is_unspecified or d.is_reserved or d.is_multicast:
+        return False
+    if d.version == 4 and d in ipaddress.ip_network("100.64.0.0/10"):   # CGNAT
+        return False
+    return True
+
+
 class SecurityGuardian:
     """Watchdog de conexiones de red. Desacoplado de la UI.
 
@@ -164,7 +181,7 @@ class SecurityGuardian:
         # filtrar aquí (algunos backends — p.ej. mock en tests, o un
         # futuro ss parser con bug— podrían no respetar el allowlist).
         suspicious = [s for s in suspicious
-                       if (s.get("remote_ip") or "") not in allowed]
+                       if (s.get("remote_ip") or "") not in allowed and es_de_internet(s.get("remote_ip") or "")]
 
         if not suspicious:
             self.last_scan_result = result
