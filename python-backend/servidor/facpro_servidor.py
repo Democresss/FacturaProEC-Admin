@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.3"
+VERSION = "1.16.4"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1261,8 +1261,29 @@ def informar_archivos(minio, config=None):
     return True
 
 
+_BORE_PUERTO_OCUPADO = r"already in use|port .* not available|address in use"
+
+
+def motivo_bore(logs):
+    """Por qué el cliente de bore no abrió el túnel, en palabras claras (sale de lo que escribió en su registro)."""
+    lineas = [ln.strip() for ln in re.sub(r"\x1b\[[0-9;]*m", "", logs or "").splitlines() if ln.strip()]
+    errores = [ln for ln in lineas if re.search(r"error|failed|refused|timed out|timeout|unreachable|resolve|dns", ln, re.I)]
+    detalle = (errores or lineas or [""])[-1][-220:]
+    if not lineas:
+        return ("El túnel no respondió en 20 segundos y bore no escribió nada. Revisa que Docker tenga internet "
+                "(Docker Desktop abierto y sin errores).")
+    if re.search(r"resolve|lookup|dns|name or service", detalle, re.I):
+        return "Docker no encuentra el nombre bore.pub (DNS). Revisa el internet o el DNS de Docker. Detalle: %s" % detalle
+    if re.search(r"refused|timed out|timeout|unreachable|connect|reset", detalle, re.I):
+        return ("Desde este equipo no se llega a bore.pub por el puerto 7835: lo bloquea un firewall, el antivirus o la "
+                "red. Deja salir conexiones TCP a bore.pub:7835 y prueba de nuevo. Detalle: %s" % detalle)
+    return "bore no abrió el túnel: %s" % (detalle or "sin detalle")
+
+
 def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=None):
-    """Túnel en bore.pub con puerto fijo; si el puerto está ocupado, prueba otro. Devuelve el puerto."""
+    """Túnel en bore.pub con puerto fijo; si el puerto está ocupado, prueba otro. Devuelve el puerto.
+    Si falla por otra cosa (firewall, DNS, sin internet) no sigue probando puertos: dice el motivo real (antes todo
+    salía como «el puerto no está disponible», aunque bore.pub nunca hubiera respondido)."""
     dk("rm", "-f", nombre)
     intentos = [preferido] if preferido else []
     intentos += [random.randint(*PUERTOS_BORE) for _ in range(5)]
@@ -1272,17 +1293,21 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
         code, out = dk(*args, timeout=600)
         if code != 0:
             raise RuntimeError("No se pudo crear el túnel: %s" % out[-300:])
-        for _ in range(15):
+        logs = ""
+        for _ in range(20):
             time.sleep(1)
             asignado, logs = _puerto_bore_de_logs(nombre)
             if asignado:
                 log("Túnel activo: %s:%d → %s:%d" % (BORE_HOST, asignado, destino_host, destino_puerto), "ok")
                 return asignado
-            if re.search(r"already in use|port .* not available|error", logs, re.I):
+            if re.search(r"error", logs, re.I):
                 break
-        log("El puerto %d de bore.pub no está disponible; probando otro…" % puerto, "aviso")
         dk("rm", "-f", nombre)
-    raise RuntimeError("bore.pub no asignó un puerto. Revisa tu internet o intenta de nuevo en unos minutos.")
+        if re.search(_BORE_PUERTO_OCUPADO, logs, re.I):
+            log("El puerto %d de bore.pub está ocupado; probando otro…" % puerto, "aviso")
+            continue
+        raise RuntimeError(motivo_bore(logs))
+    raise RuntimeError("bore.pub tenía ocupados los %d puertos probados. Intenta de nuevo en unos minutos." % len(intentos))
 
 
 def configurar(opciones):
