@@ -138,7 +138,7 @@ def instalar_docker() -> Dict[str, Any]:
 
 @router.post("/encender-docker")
 def encender_docker() -> Dict[str, Any]:
-    return _tarea("encender-docker", fs.iniciar_docker)
+    return _tarea("encender-docker", lambda: fs.iniciar_docker(manual=True))
 
 
 @router.post("/cerrar-tunel")

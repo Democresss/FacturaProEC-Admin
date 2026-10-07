@@ -3,9 +3,10 @@ import { Card } from '../components/Card';
 import { AsyncButton } from '../components/Button';
 import { CifradoCard } from '../components/CifradoCard';
 
-export function SecurityView({ call, toast }: {
+export function SecurityView({ call, toast, activo = true }: {
   call: (path: string, opts?: RequestInit) => Promise<any>;
   toast: (title: string, body?: string, kind?: any) => void;
+  activo?: boolean;
 }) {
   const [shieldActive, setShieldActive] = useState(true);
   const [autoBlock, setAutoBlock] = useState(true);
@@ -29,10 +30,11 @@ export function SecurityView({ call, toast }: {
   }, [call]);
 
   useEffect(() => {
+    if (!activo) return;            // escondida: no consulta cada 5 s
     refresh();
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, activo]);
 
   const setShield = async (on: boolean) => {
     setShieldActive(on);

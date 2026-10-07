@@ -36,6 +36,11 @@ function AppInner() {
   const { mode, effective, change } = useTheme();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<TabId>('servidor');
+  // Pestañas ya abiertas: se quedan montadas (antes, al cambiar de pestaña, se volvía a consultar todo desde cero)
+  const [abiertas, setAbiertas] = useState<TabId[]>(['servidor']);
+  useEffect(() => {
+    setAbiertas(prev => prev.includes(activeTab) ? prev : [...prev, activeTab]);
+  }, [activeTab]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
@@ -135,13 +140,17 @@ function AppInner() {
         </header>
 
         <main className="content">
-          <ErrorBoundary key={activeTab} nombre={activeDef.label}>
-          {activeTab === 'dashboard' && <DashboardView call={call} goto={goto} />}
-          {activeTab === 'security' && <SecurityView call={call} toast={toast} />}
-          {activeTab === 'storage' && <StorageView call={call} toast={toast} />}
-          {activeTab === 'servidor' && <ServidorView call={call} toast={toast} />}
-          {activeTab === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
-          </ErrorBoundary>
+          {abiertas.map(id => (
+            <div key={id} style={{ display: id === activeTab ? undefined : 'none' }}>
+              <ErrorBoundary nombre={TABS.find(t => t.id === id)?.label || id}>
+                {id === 'dashboard' && <DashboardView call={call} goto={goto} activo={activeTab === 'dashboard'} />}
+                {id === 'security' && <SecurityView call={call} toast={toast} activo={activeTab === 'security'} />}
+                {id === 'storage' && <StorageView call={call} toast={toast} />}
+                {id === 'servidor' && <ServidorView call={call} toast={toast} />}
+                {id === 'config' && <ConfigView call={call} toast={toast} theme={{ mode, effective, change }} />}
+              </ErrorBoundary>
+            </div>
+          ))}
         </main>
       </div>
 

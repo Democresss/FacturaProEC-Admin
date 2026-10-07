@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.8"
+VERSION = "1.16.9"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -393,7 +393,7 @@ def elegir_docker():
         if n > cuantos or (n >= 0 and cuantos < 0):
             mejor, cuantos = (nombre, host), n
     desktop = next(((n, h) for n, h in candidatos if n == "Docker Desktop"), None)
-    if desktop and cuantos <= 0 and _contar_contenedores(desktop[1]) < 0 and os.path.exists(DOCKER_DESKTOP_LINUX):
+    if desktop and cuantos == 0 and _contar_contenedores(desktop[1]) < 0 and os.path.exists(DOCKER_DESKTOP_LINUX):
         # Docker Desktop apagado (recién reiniciado) y el resto vacío: tus contenedores están en Docker Desktop
         mejor = desktop
     if mejor:
@@ -465,7 +465,7 @@ def docker_estado():
     code, out = dk("info", "--format", "{{.ServerVersion}}", timeout=30)
     sin_permiso = code != 0 and "permission denied" in out.lower()
     return {"instalado": True, "corriendo": code == 0, "version": out.splitlines()[0] if code == 0 and out else "",
-            "sin_permiso": sin_permiso, "motor": _MOTOR["nombre"]}
+            "sin_permiso": sin_permiso, "motor": _MOTOR["nombre"], "ocupado": code == 124}
 
 
 def contenedores():
@@ -622,17 +622,22 @@ def conectar_a_red(nombre):
     log("«%s» conectado a la red «%s» (no se modificó nada más del contenedor)" % (nombre, RED), "ok")
 
 
-def abrir_docker_desktop():
+def abrir_docker_desktop(reiniciar_colgado=False):
     """Abre Docker Desktop CON su ventana (en Linux, «systemctl --user start docker-desktop» lo encendía sin ventana y
-    tras reiniciar quedaba escondido). True si se pudo lanzar."""
+    tras reiniciar quedaba escondido). True si se pudo lanzar. Reiniciarlo cuando está encendido pero colgado SOLO si
+    lo pide el usuario (reiniciar_colgado): hecho solo por el vigilante, paraba todos los contenedores cada minuto."""
     if ES_WINDOWS:
         if os.path.exists(DOCKER_DESKTOP_EXE):
             subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
             return True
         return False
     if (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=15)[1] or "").strip() == "active":
-        # El servicio está encendido pero su Docker no responde (pasó en la .71 tras días encendido: «500 Internal Server
-        # Error»). Abrir el programa no hace nada («running under systemd»): hay que reiniciar el servicio.
+        # Encendido pero su Docker no responde (pasó en la .71: «500 Internal Server Error»). Abrir el programa no hace
+        # nada («running under systemd»): hay que reiniciar el servicio, pero solo si el usuario lo pidió.
+        if not reiniciar_colgado:
+            log("Docker Desktop está encendido pero no responde. No se reinicia solo (pararía tus contenedores): "
+                "pulsa «Encender Docker» para reiniciarlo.", "aviso")
+            return False
         log("Docker Desktop está encendido pero su Docker no responde: reiniciándolo…", "aviso")
         return run(["systemctl", "--user", "restart", "docker-desktop"], timeout=180)[0] == 0
     hay_pantalla = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
@@ -643,15 +648,22 @@ def abrir_docker_desktop():
     return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60)[0] == 0
 
 
-def iniciar_docker():
-    """Enciende Docker si está instalado pero apagado."""
-    if docker_estado()["corriendo"]:
+def iniciar_docker(manual=False):
+    """Enciende Docker si está instalado pero apagado. manual=True cuando lo pide el usuario (botón, «Configurar
+    todo»): solo entonces se reinicia un Docker Desktop colgado. El vigilante llama sin manual: si Docker solo tarda en
+    responder no se toca nada (antes, en la 2.3.21, lo reiniciaba cada minuto y paraba todos los contenedores)."""
+    estado = docker_estado()
+    if estado["corriendo"]:
         return True
+    if estado.get("ocupado") and not manual:
+        log("Docker tarda en responder (ocupado): se espera, no se toca.", "aviso")
+        return False
     log("Docker está apagado: encendiéndolo…", "paso")
     if ES_WINDOWS:
         abrir_docker_desktop()
     elif _MOTOR["nombre"] == "Docker Desktop":
-        abrir_docker_desktop()
+        if not abrir_docker_desktop(reiniciar_colgado=manual) and not manual:
+            return False
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
         ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
     else:
@@ -1405,7 +1417,7 @@ def configurar(opciones):
     config = leer_config()
     if not docker_estado()["instalado"]:
         raise RuntimeError("Docker no está instalado. Pulsa «Instalar Docker».")
-    if not iniciar_docker():
+    if not iniciar_docker(manual=True):
         raise RuntimeError("Docker está instalado pero no enciende. Ábrelo a mano y vuelve a intentar.")
     lista = contenedores_todos()
     pg_info = analizar_postgres(lista, config, opciones.get("pg_contenedor"))
@@ -3789,7 +3801,7 @@ def main(argv=None):
         servir_ayudante(int(args[i + 1]))
         return 0
     if "--iniciar-docker" in args:
-        return 0 if iniciar_docker() else 1
+        return 0 if iniciar_docker(manual=True) else 1
     if "--instalar-docker" in args:
         try:
             instalar_docker()

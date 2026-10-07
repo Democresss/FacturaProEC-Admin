@@ -14,9 +14,10 @@ interface SystemInfo {
   error?: string;
 }
 
-export function DashboardView({ call, goto }: {
+export function DashboardView({ call, goto, activo = true }: {
   call: (path: string, opts?: RequestInit) => Promise<any>;
   goto: (id: any) => void;
+  activo?: boolean;
 }) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
 
@@ -26,10 +27,11 @@ export function DashboardView({ call, goto }: {
   };
 
   useEffect(() => {
+    if (!activo) return;            // escondida: no consulta cada 15 s
     refresh();
     const id = setInterval(refresh, 15000);
     return () => clearInterval(id);
-  }, []);
+  }, [activo]);
 
   const services = info?.services || {};
   const serviceList: [string, string, boolean][] = [
