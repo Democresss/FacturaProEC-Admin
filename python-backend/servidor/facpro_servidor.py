@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.14"
+VERSION = "1.16.15"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -715,6 +715,69 @@ def abrir_docker_desktop(reiniciar_colgado=False):
                          stderr=subprocess.DEVNULL, start_new_session=True)
         return True
     return run(["systemctl", "--user", "start", "docker-desktop"], timeout=60, env=_env_usuario())[0] == 0
+
+
+def _candado_huerfano(lock):
+    """True solo si el SingletonLock de Electron («equipo-PID») es de un proceso que ya no existe. Si la ventana está
+    abierta de verdad, NO se borra (si no, se abrirían dos copias)."""
+    if not os.path.islink(lock) and not os.path.exists(lock):
+        return False
+    try:
+        destino = os.readlink(lock)
+    except OSError:
+        return False
+    pid = destino.rsplit("-", 1)[-1]
+    if not pid.isdigit():
+        return False
+    return not os.path.exists("/proc/%s" % pid)
+
+
+def abrir_interfaz_docker_desktop():
+    """Abre la ventana de Docker Desktop (Dashboard) para el usuario (botón «Abrir Docker Desktop»).
+    En Linux y sesiones remotas (XRDP), quita el SingletonLock de Electron solo si es de un proceso muerto y lo abre
+    con --disable-gpu --no-sandbox (sin GPU la ventana se cerraba sola). Nunca detiene ni reinicia Docker: si el
+    servicio está apagado solo lo enciende."""
+    if ES_WINDOWS:
+        if os.path.exists(DOCKER_DESKTOP_EXE):
+            subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
+            log("Se abrió Docker Desktop.", "ok")
+            return True
+        raise RuntimeError("No se encontró Docker Desktop en Windows.")
+
+    ruta = DOCKER_DESKTOP_LINUX
+    if not os.path.exists(ruta):
+        ruta = shutil.which("docker-desktop") or ""
+    if not ruta or not os.path.exists(ruta):
+        raise RuntimeError("No se encontró el ejecutable de Docker Desktop (/opt/docker-desktop/bin/docker-desktop).")
+
+    casa = os.path.expanduser("~")
+    for lock in (
+        os.path.join(casa, ".config", "Docker Desktop", "SingletonLock"),
+        os.path.join(casa, ".config", "docker-desktop", "SingletonLock"),
+    ):
+        if _candado_huerfano(lock):
+            try:
+                os.remove(lock)
+                log("Se quitó un candado viejo de la ventana de Docker Desktop (su proceso ya no existe).", "ok")
+            except OSError:
+                pass
+
+    res_active = (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=10, env=_env_usuario())[1] or "").strip()
+    if res_active != "active":
+        run(["systemctl", "--user", "start", "docker-desktop"], timeout=30, env=_env_usuario())
+
+    env = dict(os.environ)
+    if "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env:
+        env["DISPLAY"] = ":10.0" if os.path.exists("/tmp/.X11-unix/X10") else ":0"
+
+    cmd = [ruta, "--no-sandbox", "--disable-gpu"]
+    try:
+        subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        log("Se abrió la interfaz de Docker Desktop.", "ok")
+        return True
+    except Exception as e:
+        raise RuntimeError("No se pudo abrir Docker Desktop: %s" % e)
 
 
 def _avisar_docker_caido(ahora=None):

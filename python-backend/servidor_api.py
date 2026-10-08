@@ -141,6 +141,15 @@ def encender_docker() -> Dict[str, Any]:
     return _tarea("encender-docker", lambda: fs.iniciar_docker(manual=True))
 
 
+@router.post("/abrir-docker-desktop")
+def abrir_docker_desktop() -> Dict[str, Any]:
+    try:
+        ok = fs.abrir_interfaz_docker_desktop()
+        return {"ok": bool(ok), "message": "Se abrió la interfaz de Docker Desktop"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
+
+
 @router.post("/cerrar-tunel")
 def cerrar_tunel(n: Nombre) -> Dict[str, Any]:
     return _tarea("cerrar-tunel", fs.cerrar_tunel, n.nombre, n.host or None)

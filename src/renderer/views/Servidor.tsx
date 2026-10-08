@@ -246,6 +246,16 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               )}
               {!dock.instalado && <AsyncButton size="sm" variant="primary" onClick={() => empezar('instalar-docker', '/api/servidor/instalar-docker')}>Instalar Docker</AsyncButton>}
               {dock.instalado && !dock.corriendo && !dock.sin_permiso && <AsyncButton size="sm" variant="primary" onClick={() => empezar('encender-docker', '/api/servidor/encender-docker')}>Encender Docker</AsyncButton>}
+              {dock.instalado && (dock.motor === 'Docker Desktop' || !dock.motor) && (
+                <div style={{ marginTop: 6 }}>
+                  <AsyncButton size="sm" variant="default" onClick={async () => {
+                    const res = await call('/api/servidor/abrir-docker-desktop', { method: 'POST' });
+                    toast('Docker Desktop', res.message, res.ok ? 'success' : 'danger');
+                  }}>
+                    🖥 Abrir Docker Desktop
+                  </AsyncButton>
+                </div>
+              )}
             </div>
             <div className="stat-block">
               <div className="fw-700">🐘 PostgreSQL</div>
