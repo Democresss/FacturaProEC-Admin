@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.12"
+VERSION = "1.16.13"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1454,10 +1454,30 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
     raise RuntimeError("bore.pub tenía ocupados los %d puertos probados. Intenta de nuevo en unos minutos." % len(intentos))
 
 
+#: Opciones de «Configurar todo» que se pueden repetir solas (nunca claves)
+_OPCIONES_REPETIBLES = ("base", "minio", "puerto", "pg_contenedor", "minio_contenedor")
+_RECONFIGURANDO = threading.Lock()
+_ULTIMA_AUTO = {"t": 0.0}
+_CONFIGURANDO = {"activo": False}
+
+
 def configurar(opciones):
+    """«Configurar todo». Mientras corre, nada lo vuelve a lanzar solo (ver reconfigurar_solo)."""
+    _CONFIGURANDO["activo"] = True
+    try:
+        return _configurar(opciones)
+    finally:
+        _CONFIGURANDO["activo"] = False
+
+
+def _configurar(opciones):
     """Hace todo lo que falte. opciones: base, clave_base, minio (bool), puerto (int), detener_bore_viejo (bool),
     y para PostgreSQL fuera de Docker: pg_usuario, pg_clave, pg_base, pg_puerto."""
     config = leer_config()
+    if not opciones.get("pg_clave") and not opciones.get("clave_base"):
+        # Para poder repetirlo solo (código de enlace nuevo): solo opciones sin claves
+        config["ultimas_opciones"] = {k: opciones[k] for k in _OPCIONES_REPETIBLES if opciones.get(k) not in (None, "")}
+        guardar_config(config)
     if not docker_estado()["instalado"]:
         raise RuntimeError("Docker no está instalado. Pulsa «Instalar Docker».")
     # «Configurar todo» enciende Docker si está apagado, pero NUNCA lo reinicia: eso solo con «Encender Docker».
@@ -1608,6 +1628,10 @@ def configurar(opciones):
         enviada = informar_conexion(url, nuevo)
         if enviada is None:
             informar_direccion(puerto_pg, nuevo)
+        # Pendiente = FacturaPro aún no tiene esta conexión (p. ej. código vencido): se manda sola con el código nuevo
+        c2 = leer_config()
+        c2["conexion_pendiente"] = enviada is False
+        guardar_config(c2)
         if minio.get("clave"):
             informar_archivos({"endpoint": minio["endpoint"], "access_key": minio["usuario"], "secret_key": minio["clave"],
                                "bucket": minio["bucket"], "ca_pem": minio["ca_pem"]}, nuevo)
@@ -1692,9 +1716,38 @@ def guardar_enlace(codigo):
     guardar_config(config)
     log("Enlace con FacturaPro guardado (%s)" % datos["u"], "ok")
     r = {"ok": True, "facturapro": datos["u"]}
-    if not leer_config().get("conexion_informada"):
-        r = dict(r, siguiente="Ahora pulsa «Configurar todo»: la app manda la conexión completa a FacturaPro (no pegas nada).")
+    config = leer_config()
+    if config.get("conexion_pendiente") or not config.get("conexion_informada"):
+        if reconfigurar_solo("con el código nuevo"):
+            r = dict(r, siguiente="La app manda sola la conexión completa a FacturaPro (no pulsas nada): mira el registro.")
+        else:
+            r = dict(r, siguiente="Ahora pulsa «Configurar todo»: la app manda la conexión completa a FacturaPro (no pegas nada).")
     return r
+
+
+def reconfigurar_solo(motivo, cada=1800):
+    """Vuelve a hacer «Configurar todo» con las últimas opciones (sin claves), en segundo plano, para mandar a
+    FacturaPro la conexión completa (PostgreSQL y MinIO). True si se lanzó. Como mucho una vez cada `cada` segundos
+    (salvo con un código nuevo) y nunca dos a la vez."""
+    opciones = leer_config().get("ultimas_opciones")
+    if not opciones or _CONFIGURANDO["activo"]:
+        return False
+    if motivo != "con el código nuevo" and time.time() - _ULTIMA_AUTO["t"] < cada:
+        return False
+    if not _RECONFIGURANDO.acquire(blocking=False):
+        return False
+    _ULTIMA_AUTO["t"] = time.time()
+
+    def correr():
+        try:
+            log("FacturaPro no tiene la conexión de tu base: se manda sola %s (como «Configurar todo»)…" % motivo, "paso")
+            configurar(dict(opciones))
+        except Exception as e:  # noqa: BLE001
+            evento("No se pudo mandar la conexión sola: %s. Pulsa «Configurar todo»." % e, "error")
+        finally:
+            _RECONFIGURANDO.release()
+    threading.Thread(target=correr, daemon=True).start()
+    return True
 
 
 def informar_conexion(url, config=None):
@@ -1774,6 +1827,12 @@ def informar_direccion(puerto, config=None, host=None):
             motivo = e.reason
         _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % motivo
         evento(_AVISO["motivo"], "error")
+        if "identificada" in str(motivo):
+            # FacturaPro necesita la conexión COMPLETA (no solo el puerto): se manda sola
+            c2 = leer_config()
+            c2["conexion_pendiente"] = True
+            guardar_config(c2)
+            reconfigurar_solo("porque FacturaPro aún no tiene tu base identificada")
         return False
     except Exception as e:  # noqa: BLE001 - sin internet, DNS…
         _AVISO["motivo"] = problema_enlace(datos["u"]) or "No se pudo avisar a FacturaPro (%s). Se reintentará." % e
@@ -1782,6 +1841,8 @@ def informar_direccion(puerto, config=None, host=None):
     if not respuesta.get("success"):
         _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error")
         evento(_AVISO["motivo"], "error")
+        if "identificada" in str(respuesta.get("error") or ""):
+            reconfigurar_solo("porque FacturaPro aún no tiene tu base identificada")
         return False
     config = leer_config()
     config.update(puerto_informado=int(puerto), informado=time.strftime("%Y-%m-%d %H:%M"))
