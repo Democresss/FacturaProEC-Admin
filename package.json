@@ -1,6 +1,6 @@
 {
   "name": "facturaproec-admin",
-  "version": "2.3.26",
+  "version": "2.3.27",
   "description": "FacPro Server Manager - base de datos, túnel bore y servicios automáticos para FacturaPro",
   "author": "Democresss",
   "license": "MIT",

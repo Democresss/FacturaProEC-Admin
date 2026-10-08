@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.11"
+VERSION = "1.16.12"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -689,8 +689,8 @@ def _avisar_docker_caido(ahora=None):
 
 
 def iniciar_docker(manual=False):
-    """Enciende Docker si está instalado pero apagado. manual=True cuando lo pide el usuario (botón, «Configurar
-    todo»): solo entonces se reinicia un Docker Desktop colgado. El vigilante llama sin manual: si Docker solo tarda en
+    """Enciende Docker si está instalado pero apagado. manual=True SOLO con el botón «Encender Docker»: es lo único
+    que puede reiniciar un Docker Desktop colgado («Configurar todo» y el vigilante nunca lo reinician). El vigilante llama sin manual: si Docker solo tarda en
     responder no se toca nada (antes, en la 2.3.21, lo reiniciaba cada minuto y paraba todos los contenedores)."""
     estado = docker_estado()
     if estado["corriendo"]:
@@ -1460,8 +1460,9 @@ def configurar(opciones):
     config = leer_config()
     if not docker_estado()["instalado"]:
         raise RuntimeError("Docker no está instalado. Pulsa «Instalar Docker».")
-    if not iniciar_docker(manual=True):
-        raise RuntimeError("Docker está instalado pero no enciende. Ábrelo a mano y vuelve a intentar.")
+    # «Configurar todo» enciende Docker si está apagado, pero NUNCA lo reinicia: eso solo con «Encender Docker».
+    if not iniciar_docker():
+        raise RuntimeError("Docker no responde. Pulsa «Encender Docker» (o ábrelo tú) y vuelve a «Configurar todo».")
     lista = contenedores_todos()
     pg_info = analizar_postgres(lista, config, opciones.get("pg_contenedor"))
     if pg_info.get("host") and pg_info["host"] != (os.environ.get("DOCKER_HOST") or ""):
@@ -3844,7 +3845,7 @@ def main(argv=None):
         servir_ayudante(int(args[i + 1]))
         return 0
     if "--iniciar-docker" in args:
-        return 0 if iniciar_docker(manual=True) else 1
+        return 0 if iniciar_docker() else 1   # el ayudante solo ENCIENDE el Docker del sistema; nunca reinicia
     if "--instalar-docker" in args:
         try:
             instalar_docker()
