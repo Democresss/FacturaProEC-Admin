@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.13"
+VERSION = "1.16.14"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -256,14 +256,55 @@ def sin_secretos(config):
 
 # ─────────────────────────────── Docker ───────────────────────────────
 
-_CARPETAS_DOCKER_WINDOWS = [os.path.join(os.environ.get(v) or "", "Docker", "Docker")
-                            for v in ("ProgramFiles", "ProgramW6432")] + [
-    os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Docker", "Docker"), r"C:\Program Files\Docker\Docker"]
-RUTAS_DOCKER_WINDOWS = tuple(dict.fromkeys(os.path.join(c, "resources", "bin", "docker.exe") for c in _CARPETAS_DOCKER_WINDOWS))
-DOCKER_DESKTOP_EXE = next((os.path.join(c, "Docker Desktop.exe") for c in _CARPETAS_DOCKER_WINDOWS
-                           if os.path.exists(os.path.join(c, "Docker Desktop.exe"))), r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
-# Linux: el programa de Docker Desktop (abre su ventana y enciende su Docker)
-DOCKER_DESKTOP_LINUX = "/opt/docker-desktop/bin/docker-desktop"
+def _carpetas_docker_windows():
+    """Dónde puede estar Docker Desktop en Windows, de cualquier versión: Program Files, la instalación por usuario y
+    la carpeta del docker.exe que esté en el PATH (…/Docker/resources/bin/docker.exe → …/Docker)."""
+    carpetas = [os.path.join(os.environ.get(v) or "", "Docker", "Docker") for v in ("ProgramFiles", "ProgramW6432")]
+    carpetas += [os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Docker", "Docker"),
+                 r"C:\Program Files\Docker\Docker"]
+    en_path = shutil.which("docker")
+    if en_path:
+        d = os.path.dirname(os.path.abspath(en_path))
+        carpetas += [os.path.dirname(os.path.dirname(d)), os.path.dirname(d), d]
+    return [c for c in dict.fromkeys(carpetas) if c]
+
+
+_CARPETAS_DOCKER_WINDOWS = _carpetas_docker_windows()
+RUTAS_DOCKER_WINDOWS = tuple(dict.fromkeys(
+    [os.path.join(c, "resources", "bin", "docker.exe") for c in _CARPETAS_DOCKER_WINDOWS]
+    + [os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "Docker Toolbox", "docker.exe")]))
+#: «Docker Desktop.exe» desde la 2.x; «Docker for Windows.exe» en las versiones viejas
+_NOMBRES_DOCKER_DESKTOP_EXE = ("Docker Desktop.exe", "Docker for Windows.exe")
+DOCKER_DESKTOP_EXE = next((os.path.join(c, n) for c in _CARPETAS_DOCKER_WINDOWS for n in _NOMBRES_DOCKER_DESKTOP_EXE
+                           if os.path.exists(os.path.join(c, n))), r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
+
+
+def _docker_desktop_linux():
+    """El programa de Docker Desktop en Linux (abre su ventana y enciende su Docker), donde lo haya puesto cada versión."""
+    for ruta in ("/opt/docker-desktop/bin/docker-desktop", "/usr/local/bin/docker-desktop", "/usr/bin/docker-desktop",
+                 shutil.which("docker-desktop") or ""):
+        if ruta and os.path.exists(ruta):
+            return ruta
+    return "/opt/docker-desktop/bin/docker-desktop"
+
+
+DOCKER_DESKTOP_LINUX = _docker_desktop_linux()
+_SOCKET_DESKTOP = {"ruta": None}
+
+
+def _socket_docker_desktop(casa):
+    """Socket de Docker Desktop: el del contexto «desktop-linux» del CLI (cambia entre versiones); si no, el de siempre."""
+    if _SOCKET_DESKTOP["ruta"] is None:
+        _SOCKET_DESKTOP["ruta"] = ""
+        try:
+            r = subprocess.run([DOCKER, "context", "inspect", "desktop-linux", "--format", "{{.Endpoints.docker.Host}}"],
+                               capture_output=True, text=True, timeout=10)
+            host = (r.stdout or "").strip().splitlines()[0] if r.returncode == 0 and (r.stdout or "").strip() else ""
+            if host.startswith("unix://"):
+                _SOCKET_DESKTOP["ruta"] = host[7:]
+        except Exception:
+            pass
+    return _SOCKET_DESKTOP["ruta"] or os.path.join(casa, ".docker", "desktop", "docker.sock")
 
 
 _MOTOR = {"elegido": False, "nombre": ""}
@@ -292,7 +333,7 @@ def _motores_candidatos():
         casa, uid = datos.pw_dir, datos.pw_uid
     except Exception:
         casa, uid = os.path.expanduser("~"), os.getuid() if hasattr(os, "getuid") else 0
-    desktop = os.path.join(casa, ".docker", "desktop", "docker.sock")
+    desktop = _socket_docker_desktop(casa)
     candidatos = [("Docker del sistema (el de «sudo docker»)", "/var/run/docker.sock"),
                   ("Docker Desktop", desktop),
                   ("Docker del usuario (sin root)", "/run/user/%d/docker.sock" % uid)]
@@ -385,7 +426,7 @@ def elegir_docker():
                 os.environ["DOCKER_HOST"] = host
                 _MOTOR["nombre"] = nombre
                 return
-        if guardado.endswith("/.docker/desktop/docker.sock"):
+        if "/.docker/desktop/" in guardado or "docker-desktop" in guardado:
             # El Docker Desktop de tu usuario, visto desde el vigilante del sistema (root): ese socket no está entre
             # los de root. Se usa igual y nunca se enciende el Docker del sistema en su lugar.
             os.environ["DOCKER_HOST"] = guardado
