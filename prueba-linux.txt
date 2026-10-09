@@ -1,0 +1,15 @@
+OK   el backend arranca y da su puerto                                      55571
+OK   sin la clave: 401 (una página web no puede usarlo)                     
+OK   con la clave de la app: 200                                            
+OK   una página web ajena no recibe permiso CORS                            400
+OK   «Servidor y túnel» revisa el equipo                                    {'instalado': False, 'corriendo': False, 'version': '', 'motores': [{'nombre': 'Docker del sistema (el de «sudo docker»)
+OK   Seguridad: las claves guardadas están cifradas                         {"ok":true,"metodo":"llave local de tu usuario (permiso 600)","cifradas":0,"en_claro":0,"archivo":"/github/home/.config/
+OK   «Servidor y túnel»: progreso                                           
+OK   Servicios automáticos: lista Docker y vigilante                        ['docker', 'vigilante', 'admin']
+OK   el mismo ejecutable sirve de vigilante (--version)                     1.16.16
+OK   --ayudante es el ayudante (no levanta el servidor de la app)             ✖ El ayudante solo corre como servicio del sistema (root) con --uid.
+
+OK   sin BRIDGE_TOKEN el servidor de la app no arranca                      El servidor de la app solo arranca desde FacPro Server Manager (falta BRIDGE_TOKEN).
+
+
+RESULTADO: TODO OK (11/11)

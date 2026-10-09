@@ -1,0 +1,14 @@
+OK   el backend arranca y da su puerto                                      57660
+OK   sin la clave: 401 (una página web no puede usarlo)                     
+OK   con la clave de la app: 200                                            
+OK   una página web ajena no recibe permiso CORS                            400
+OK   «Servidor y túnel» revisa el equipo                                    {'instalado': True, 'corriendo': False, 'version': '', 'sin_permiso': False, 'motor': '', 'ocupado': False}
+OK   Seguridad: las claves guardadas están cifradas                         {"ok":true,"metodo":"DPAPI de Windows (ligado a tu cuenta)","cifradas":0,"en_claro":0,"archivo":"C:\\Users\\runneradmin\
+OK   «Servidor y túnel»: progreso                                           
+OK   Servicios automáticos: lista Docker y vigilante                        ['docker', 'vigilante', 'admin']
+OK   el mismo ejecutable sirve de vigilante (--version)                     1.16.16
+OK   --ayudante es el ayudante (no levanta el servidor de la app)           2026-10-09 01:35:11,139] config_manager WARNING: No se pudo configurar Autostart en registro de Windows: [WinError 2] Th
+OK   sin BRIDGE_TOKEN el servidor de la app no arranca                      El servidor de la app solo arranca desde FacPro Server Manager (falta BRIDGE_TOKEN).
+
+
+RESULTADO: TODO OK (11/11)
