@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.15"
+VERSION = "1.16.16"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -1301,9 +1301,13 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
         if not dentro:
             lineas.append(linea)
     bloque = [MARCA_HBA_INICIO, "# Por el túnel de bore solo entra FacturaPro (lo escribe FacPro Servidor)."]
+    # El usuario de la app entra por el túnel; el dueño de la base (sea cual sea su nombre) también, pero SOLO cifrado
+    # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
     for red in subredes:
-        bloque += ["host %s %s %s md5" % (base, usuario, red), "hostssl %s %s %s md5" % (base, usuario, red),
-                   "host all all %s reject" % red, "hostssl all all %s reject" % red]
+        bloque += ["host %s %s %s md5" % (base, usuario, red), "hostssl %s %s %s md5" % (base, usuario, red)]
+        if admin_usuario and admin_usuario != usuario:
+            bloque += ["hostssl %s %s %s md5" % (base, admin_usuario, red)]
+        bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
     code, out = run([DOCKER, "exec", "-i", cont, "sh", "-c", "cat > '%s'" % ruta.replace("'", "")], entrada=nuevo, timeout=30)
@@ -1971,8 +1975,10 @@ def reparar_tunel(config=None):
     """Vuelve a levantar el túnel de PostgreSQL. Devuelve el puerto con el que quedó (o None)."""
     config = config if config is not None else leer_config()
     anterior = config.get("bore_puerto_pg")
-    if not iniciar_docker():
-        evento("Docker no enciende: no se puede levantar el túnel todavía (se reintenta).", "error")
+    # El vigilante NUNCA enciende, reinicia ni cierra Docker (antes llamaba a iniciar_docker y en Linux con Docker
+    # Engine terminaba en «systemctl start docker»): si Docker no está, solo avisa y reintenta en la próxima vuelta.
+    if not docker_estado().get("corriendo"):
+        evento("Docker no está corriendo: el túnel se levanta cuando vuelva (FacPro no toca Docker).", "error")
         return None
     pg = config.get("pg_contenedor")
     if pg and any(c["nombre"] == pg and c["estado"] != "running" for c in contenedores()):
