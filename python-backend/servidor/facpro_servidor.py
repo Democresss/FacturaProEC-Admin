@@ -40,7 +40,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "1.16.16"
+VERSION = "1.16.17"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
 BORE_HOST = "bore.pub"
@@ -420,28 +420,37 @@ def elegir_docker():
     guardado = leer_config().get("docker_host")
     if guardado is not None:
         if guardado == "":
-            return
-        for nombre, host in candidatos:
-            if host == guardado:
-                os.environ["DOCKER_HOST"] = host
-                _MOTOR["nombre"] = nombre
+            n_def, sin_p_def = _probar_motor("")
+            if not sin_p_def and n_def >= 0:
                 return
-        if "/.docker/desktop/" in guardado or "docker-desktop" in guardado:
-            # El Docker Desktop de tu usuario, visto desde el vigilante del sistema (root): ese socket no está entre
-            # los de root. Se usa igual y nunca se enciende el Docker del sistema en su lugar.
-            os.environ["DOCKER_HOST"] = guardado
-            _MOTOR["nombre"] = "Docker Desktop"
-            return
+        else:
+            for nombre, host in candidatos:
+                if host == guardado:
+                    n_g, sin_p_g = _probar_motor(host)
+                    if not sin_p_g and n_g >= 0:
+                        os.environ["DOCKER_HOST"] = host
+                        _MOTOR["nombre"] = nombre
+                        return
+                    break
+            if "/.docker/desktop/" in guardado or "docker-desktop" in guardado:
+                n_g, sin_p_g = _probar_motor(guardado)
+                if not sin_p_g and n_g >= 0:
+                    os.environ["DOCKER_HOST"] = guardado
+                    _MOTOR["nombre"] = "Docker Desktop"
+                    return
+        # Si el motor guardado da error de permisos o no responde, no bloquearse: evaluar todos los candidatos
     if not candidatos:
         return
-    mejor, cuantos = None, _contar_contenedores()
+    mejor, cuantos = None, -1
     for nombre, host in candidatos:
-        n = _contar_contenedores(host)
+        n, sin_p = _probar_motor(host)
+        if sin_p:
+            continue
         if n > cuantos or (n >= 0 and cuantos < 0):
             mejor, cuantos = (nombre, host), n
     desktop = next(((n, h) for n, h in candidatos if n == "Docker Desktop"), None)
-    if desktop and cuantos == 0 and _contar_contenedores(desktop[1]) < 0 and os.path.exists(DOCKER_DESKTOP_LINUX):
-        # Docker Desktop apagado (recién reiniciado) y el resto vacío: tus contenedores están en Docker Desktop
+    if desktop and cuantos <= 0 and os.path.exists(DOCKER_DESKTOP_LINUX):
+        # Docker Desktop instalado: si no hay otro con contenedores, preferir Docker Desktop
         mejor = desktop
     if mejor:
         os.environ["DOCKER_HOST"] = mejor[1]
@@ -449,7 +458,7 @@ def elegir_docker():
         log("Se usa %s (ahí están tus contenedores)." % mejor[0], "ok")
         if cuantos > 0:   # que después de reiniciar se use el mismo, aunque esté apagado
             config = leer_config()
-            config.setdefault("docker_host", mejor[1])
+            config["docker_host"] = mejor[1]
             guardar_config(config)
 
 
@@ -516,6 +525,24 @@ def docker_estado():
     versiones = [l.strip() for l in (out or "").splitlines() if re.match(r"^\d+\.\d+", l.strip())]
     version = versiones[0] if versiones else ""
     corriendo = code == 0 and bool(version)
+
+    if not corriendo and not ES_WINDOWS:
+        # Si el motor actual no responde o no tiene permiso, buscar si otro candidato del equipo sí responde
+        actual_host = os.environ.get("DOCKER_HOST") or ""
+        for nombre, host in _motores_candidatos():
+            if host == actual_host:
+                continue
+            code_alt, out_alt = dk("info", "--format", "{{.ServerVersion}}", timeout=15, host=host)
+            vers_alt = [l.strip() for l in (out_alt or "").splitlines() if re.match(r"^\d+\.\d+", l.strip())]
+            if code_alt == 0 and vers_alt:
+                # Conmutar automáticamente al motor que sí responde
+                try:
+                    usar_motor(host)
+                except Exception:
+                    pass
+                return {"instalado": True, "corriendo": True, "version": vers_alt[0],
+                        "sin_permiso": False, "motor": nombre, "ocupado": False}
+
     return {"instalado": True, "corriendo": corriendo, "version": version if corriendo else "",
             "sin_permiso": sin_permiso, "motor": _MOTOR["nombre"], "ocupado": code == 124}
 
@@ -594,7 +621,7 @@ def contenedores_todos(motores=None):
     if len(motores) <= 1:
         if motores:
             with en_motor(motores[0]["host"]):
-                return contenedores()
+                return [dict(c, motor=motores[0]["nombre"], host=motores[0]["host"]) for c in contenedores()]
         return contenedores()
     salida = []
     for m in motores:
@@ -812,9 +839,17 @@ def iniciar_docker(manual=False):
             _avisar_docker_caido()
             return False
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
-        ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
+        if manual:
+            ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
+        else:
+            log("Docker del sistema está apagado. Para encenderlo usa «Encender Docker».", "aviso")
+            return False
     else:
-        run(["systemctl", "start", "docker"], timeout=60)
+        if manual:
+            run(["systemctl", "start", "docker"], timeout=60)
+        else:
+            log("Docker del sistema está apagado. Para encenderlo usa «Encender Docker».", "aviso")
+            return False
     for _ in range(90 if _MOTOR["nombre"] == "Docker Desktop" or ES_WINDOWS else 45):  # Docker Desktop tarda más
         time.sleep(2)
         if docker_estado()["corriendo"]:
@@ -1105,7 +1140,11 @@ def analizar(pg_elegido=None, minio_elegido=None):
         "internet": {"bore_pub": puerto_abierto(BORE_HOST, BORE_PUERTO_CONTROL, 5)},
         "config": sin_secretos(config),
     }
-    if resultado["docker"]["corriendo"]:
+    algun_motor_activo = resultado["docker"]["corriendo"] or any(
+        m.get("contenedores", -1) >= 0 for m in resultado["docker"].get("motores", [])
+    )
+    if algun_motor_activo:
+        resultado["docker"]["corriendo"] = True
         lista = contenedores_todos(resultado["docker"].get("motores"))
         resultado["postgres"] = analizar_postgres(lista, config, pg_elegido)
         resultado["minio"] = analizar_minio(lista, minio_elegido, config)
@@ -3010,7 +3049,7 @@ class Manejador(BaseHTTPRequestHandler):
         if ruta == "/api/instalar-docker":
             return self._json({"ok": _en_hilo("instalar-docker", instalar_docker)})
         if ruta == "/api/encender-docker":
-            return self._json({"ok": _en_hilo("encender-docker", iniciar_docker)})
+            return self._json({"ok": _en_hilo("encender-docker", lambda: iniciar_docker(manual=True))})
         if ruta == "/api/enlace":
             try:
                 return self._json(guardar_enlace(datos.get("codigo")))
@@ -3470,7 +3509,7 @@ def interfaz_ventana():
             if not d["instalado"]:
                 boton(f, "Instalar Docker", lambda: tarea("instalar-docker", _instalar_docker_ui), primario=True).pack(anchor="w", pady=(6, 0))
             else:
-                boton(f, "Encender Docker", lambda: tarea("encender-docker", iniciar_docker), primario=True).pack(anchor="w", pady=(6, 0))
+                boton(f, "Encender Docker", lambda: tarea("encender-docker", lambda: iniciar_docker(manual=True)), primario=True).pack(anchor="w", pady=(6, 0))
         # Opciones
         limpiar(zona_base)
         limpiar(zona_pg)
