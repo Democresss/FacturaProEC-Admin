@@ -1345,7 +1345,7 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
     for red in subredes:
         bloque += ["host %s %s %s md5" % (base, usuario, red), "hostssl %s %s %s md5" % (base, usuario, red)]
         if admin_usuario and admin_usuario != usuario:
-            bloque += ["hostssl %s %s %s md5" % (base, admin_usuario, red)]
+            bloque += ["host %s %s %s md5" % (base, admin_usuario, red), "hostssl %s %s %s md5" % (base, admin_usuario, red)]
         bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
@@ -1864,6 +1864,12 @@ def guardar_enlace(codigo):
     log("Enlace con FacturaPro guardado (%s)" % datos["u"], "ok")
     r = {"ok": True, "facturapro": datos["u"]}
     config = leer_config()
+    puerto = config.get("bore_puerto_pg")
+    if puerto:
+        try:
+            informar_direccion(puerto, config)
+        except Exception:
+            pass
     if config.get("conexion_pendiente") or not config.get("conexion_informada"):
         if reconfigurar_solo("con el código nuevo"):
             r = dict(r, siguiente="La app manda sola la conexión completa a FacturaPro (no pulsas nada): mira el registro.")
@@ -1974,11 +1980,11 @@ def informar_direccion(puerto, config=None, host=None):
             motivo = e.reason
         _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % motivo
         evento(_AVISO["motivo"], "error")
-        if "identificada" in str(motivo):
-            # FacturaPro necesita la conexión COMPLETA (no solo el puerto): se manda sola
+        if any(w in str(motivo).lower() for w in ("identificada", "conectada", "no tiene su base")):
             c2 = leer_config()
             c2["conexion_pendiente"] = True
             guardar_config(c2)
+            evento("FacturaPro necesita registrar tu base por primera vez: pulsa «Configurar todo» (arriba) para enviar la conexión completa automáticamente.", "aviso")
             reconfigurar_solo("porque FacturaPro aún no tiene tu base identificada")
         return False
     except Exception as e:  # noqa: BLE001 - sin internet, DNS…
@@ -1988,7 +1994,11 @@ def informar_direccion(puerto, config=None, host=None):
     if not respuesta.get("success"):
         _AVISO["motivo"] = "FacturaPro no aceptó la dirección nueva: %s" % respuesta.get("error")
         evento(_AVISO["motivo"], "error")
-        if "identificada" in str(respuesta.get("error") or ""):
+        if any(w in str(respuesta.get("error") or "").lower() for w in ("identificada", "conectada", "no tiene su base")):
+            c2 = leer_config()
+            c2["conexion_pendiente"] = True
+            guardar_config(c2)
+            evento("FacturaPro necesita registrar tu base por primera vez: pulsa «Configurar todo» (arriba) para enviar la conexión completa automáticamente.", "aviso")
             reconfigurar_solo("porque FacturaPro aún no tiene tu base identificada")
         return False
     config = leer_config()
@@ -2993,6 +3003,57 @@ def _en_hilo(tarea, funcion, *args):
     return True
 
 
+def comprobar_actualizacion():
+    """Consulta si hay una versión más nueva en GitHub o FacturaPro."""
+    url_api = "https://api.github.com/repos/Democresss/FacturaProEC-Admin/releases/latest"
+    url_descarga_fp = "https://facturapro-ec-463201559114.us-central1.run.app/static/downloads/FacPro-Servidor.zip"
+    try:
+        req = urllib.request.Request(url_api, headers={"User-Agent": "FacProServidor/" + VERSION, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                tag = str(data.get("tag_name") or "").strip().lstrip("v")
+                html_url = data.get("html_url") or "https://github.com/Democresss/FacturaProEC-Admin/releases/latest"
+                def _partes(v):
+                    return [int(x) if x.isdigit() else 0 for x in re.findall(r"\d+", v)]
+                if tag and _partes(tag) > _partes(VERSION):
+                    return {
+                        "ok": True,
+                        "nueva": True,
+                        "version_actual": VERSION,
+                        "version_nueva": tag,
+                        "url": html_url,
+                        "zip_url": url_descarga_fp,
+                        "notas": [l.strip() for l in (data.get("body") or "").splitlines() if l.strip()][:5]
+                    }
+                return {
+                    "ok": True,
+                    "nueva": False,
+                    "version_actual": VERSION,
+                    "mensaje": "Tienes la versión más reciente (%s)" % VERSION,
+                    "zip_url": url_descarga_fp
+                }
+    except Exception as e:
+        log("No se pudo consultar GitHub: %s" % e, "aviso")
+    try:
+        req_fp = urllib.request.Request(url_descarga_fp, headers={"User-Agent": "FacProServidor/" + VERSION}, method="HEAD")
+        with urllib.request.urlopen(req_fp, timeout=4.0) as resp:
+            if resp.status == 200:
+                return {
+                    "ok": True,
+                    "nueva": False,
+                    "version_actual": VERSION,
+                    "mensaje": "FacPro Servidor está al día.",
+                    "zip_url": url_descarga_fp
+                }
+    except Exception:
+        pass
+    return {
+        "ok": False,
+        "error": "No se pudo comprobar la versión en línea. Comprueba tu conexión a internet o descarga la versión más reciente desde FacturaPro."
+    }
+
+
 class Manejador(BaseHTTPRequestHandler):
     server_version = "FacProServidor/" + VERSION
 
@@ -3065,6 +3126,14 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": str(e)}, 400)
             encender_vigilante_aqui()
             return self._json(r)
+        if ruta == "/api/desinstalar-vigilante":
+            try:
+                quitar_vigilante()
+                return self._json({"ok": True})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+        if ruta == "/api/actualizacion":
+            return self._json(comprobar_actualizacion())
         if ruta == "/api/salir":
             self._json({"ok": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -3844,7 +3913,7 @@ select,input{width:100%;background:var(--p2);color:var(--t);border:1px solid var
 .nota{color:var(--m);font-size:12.5px}.oculto{display:none}a{color:var(--az)}
 </style></head><body>
 <header><div class="logo">FP</div><div><h1>FacPro Servidor</h1><small>Tu base de datos lista para FacturaPro · v__VERSION__</small></div>
-<div style="margin-left:auto;display:flex;gap:8px"><button class="sec" onclick="analizar()">↻ Revisar</button><button class="sec" onclick="salir()">Cerrar</button></div></header>
+<div style="margin-left:auto;display:flex;gap:8px"><button class="sec" id="btnAct" onclick="buscarActualizacion()">⬇ Buscar actualización</button><button class="sec" onclick="analizar()">↻ Revisar</button><button class="sec" onclick="salir()">Cerrar</button></div></header>
 <main>
   <h2>1. Lo que hay en este equipo</h2>
   <div class="grid" id="tarjetas"><div class="card"><h3><span class="dot gi"></span>Revisando…</h3><p>Docker, PostgreSQL, MinIO y el túnel.</p></div></div>
@@ -3871,18 +3940,18 @@ select,input{width:100%;background:var(--p2);color:var(--t);border:1px solid var
 
   <div id="bloqueRes" class="card res oculto" style="margin-top:18px"></div>
 
-  <h2>3. Que se arregle solo</h2>
+  <h2>3. Que se arregle solo (Vigilante automático)</h2>
   <div class="card" id="bloqueVigilante">
-    <p class="nota">Si el túnel se cae, Docker lo vuelve a levantar con el mismo puerto. Si bore.pub le dio ese puerto a otro,
-      el vigilante toma uno nuevo y se lo avisa a FacturaPro con el código de enlace (FacturaPro → Conecta tu base de datos →
-      Dirección de tu base → Generar código). El código solo sirve para cambiar la dirección de tu base.</p>
-    <label>Código de enlace de FacturaPro</label>
-    <div class="url" style="margin-top:0"><input id="enlace" placeholder="FPENLACE.…" autocomplete="off"><button class="sec" onclick="guardarEnlace()">Guardar</button></div>
-    <p id="estadoVig" class="nota" style="margin-top:8px"></p>
-    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-      <button class="pri" onclick="instalarVigilante()">Vigilar siempre (arranca con el equipo)</button>
-      <button class="sec" onclick="avisarAhora()">Avisar la dirección a FacturaPro ahora</button>
+    <div style="background:#091428;border:1px solid #1e3a8a;border-radius:10px;padding:12px 14px;margin-bottom:14px">
+      <h3 style="margin:0 0 6px;color:#60a5fa;font-size:14px">🛡️ ¿Qué hace el Vigilante?</h3>
+      <p style="font-size:12.5px;color:#cbd5e1;margin:0;line-height:1.55">
+        El <b>Vigilante</b> es un servicio ligero en segundo plano. Su <b>única función</b> es supervisar el túnel de <code>bore.pub</code>: si tu computadora se reinicia o bore asigna un puerto nuevo, el vigilante actualiza el puerto en FacturaPro automáticamente para que nunca pierdas conexión. <b>No toca tus datos, no consume recursos ni hace nada más.</b>
+      </p>
     </div>
+    <label>Código de enlace de FacturaPro</label>
+    <div class="url" style="margin-top:0"><input id="enlace" placeholder="FPENLACE.…" autocomplete="off"><button class="sec" onclick="guardarEnlace()">Guardar enlace</button></div>
+    <p id="estadoVig" class="nota oculto" style="margin-top:8px"></p>
+    <div id="cajaEstadoVig" style="margin-top:10px"></div>
   </div>
 
   <h2>Registro</h2>
@@ -3922,9 +3991,52 @@ function pintar(){
   t.push(tarjeta(A.internet.bore_pub?'ok':'er','Internet',[A.internet.bore_pub?'bore.pub responde':'No se llega a bore.pub: revisa tu internet']));
   if(A.conexion)t.push(tarjeta(A.conexion.en_linea?'ok':'er','Conexión para FacturaPro',[A.conexion.en_linea?'En línea con SSL':'Configurada pero no responde ahora']));
   const v=A.vigilante||{};
-  $('estadoVig').innerHTML=(v.enlace?'<span style="color:var(--ok)">✓ Enlazado con '+esc(v.facturapro)+'</span>':'<span style="color:var(--av)">Sin enlace: si cambia el puerto tendrás que cambiarlo a mano en FacturaPro</span>')
-    +' · '+(v.instalado?'<span style="color:var(--ok)">vigilante instalado</span>':'vigilante no instalado')
-    +(v.informado?' · último aviso '+esc(v.informado)+' (puerto '+esc(v.puerto_informado)+')':'');
+  let vigHtml = '';
+  if(v.enlace){
+    vigHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="dot ok"></span><span style="color:var(--ok);font-weight:600">✓ Enlazado con ${esc(v.facturapro)}</span></div>`;
+  } else {
+    vigHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="dot av"></span><span style="color:var(--av)">Sin enlace con FacturaPro: genera un código en FacturaPro (Conecta tu base de datos → Dirección) y pégalo arriba.</span></div>`;
+  }
+  if(v.instalado){
+    vigHtml += `
+      <div style="background:#062312;border:1px solid #22c55e66;border-radius:10px;padding:12px;margin:8px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="dot ok"></span>
+          <b style="color:#4ade80">Vigilante INSTALADO y ACTIVO</b>
+          <span class="nota">(arranca automáticamente con Windows/PC y supervisa bore.pub)</span>
+        </div>
+        ${v.informado ? `<p class="nota" style="margin:6px 0 0;color:#86efac">Último aviso a FacturaPro: ${esc(v.informado)} (puerto ${esc(v.puerto_informado)})</p>` : ''}
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="pri" onclick="avisarAhora()">↻ Comprobar y avisar puerto ahora</button>
+          <button class="sec" onclick="desinstalarVigilante()">Desinstalar Vigilante</button>
+        </div>
+      </div>`;
+  } else {
+    vigHtml += `
+      <div style="background:#201705;border:1px solid #f59e0b66;border-radius:10px;padding:12px;margin:8px 0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="dot av"></span>
+          <b style="color:#fbbf24">Vigilante NO instalado</b>
+        </div>
+        <p class="nota" style="margin:6px 0 0;color:#fde68a">
+          Actualmente el vigilante no está instalado. Si se reinicia el equipo o cambia el puerto de bore.pub, tendrás que abrir esta aplicación manualmente.
+        </p>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="pri" style="background:#f59e0b;color:#000;font-weight:600" onclick="instalarVigilante()">🛡️ Instalar Vigilante de Inicio Automático</button>
+          <button class="sec" onclick="avisarAhora()">Avisar puerto a FacturaPro ahora</button>
+        </div>
+      </div>`;
+  }
+  if(A.config && A.config.conexion_pendiente){
+    vigHtml += `
+      <div style="background:#1e1b4b;border:1px solid #6366f166;border-radius:10px;padding:10px 12px;margin-top:8px">
+        <p style="margin:0;color:#c7d2fe;font-size:12.5px">
+          💡 <b>Paso siguiente:</b> FacturaPro necesita registrar tu base por primera vez con este enlace. Pulsa <b>«Configurar todo»</b> (arriba) para enviarla automáticamente sin copiar contraseñas.
+        </p>
+      </div>`;
+  }
+  $('cajaEstadoVig').innerHTML = vigHtml;
+  $('estadoVig').innerHTML = (v.enlace ? '✓ Enlazado con ' + esc(v.facturapro) : 'Sin enlace') + ' · ' + (v.instalado ? 'vigilante instalado' : 'vigilante no instalado');
   $('tarjetas').innerHTML=t.join('');
   // Docker
   const bd=$('bloqueDocker');
@@ -3982,9 +4094,60 @@ function mostrar(r){
   b.innerHTML=h;b.classList.remove('oculto');
 }
 function copiar(id,btn){navigator.clipboard.writeText($(id).textContent).then(()=>{btn.textContent='Copiado';setTimeout(()=>btn.textContent='Copiar',1500)})}
-async function guardarEnlace(){const r=await api('/api/enlace',{method:'POST',body:JSON.stringify({codigo:$('enlace').value.trim()})});
-  if(r.ok){$('enlace').value='';analizar();progreso()}else alert(r.error||'No se pudo guardar')}
-async function instalarVigilante(){const r=await api('/api/vigilante',{method:'POST'});if(!r.ok)alert(r.error||'No se pudo instalar');analizar();progreso()}
+async function guardarEnlace(){
+  const codigo=$('enlace').value.trim();
+  if(!codigo){alert('Escribe o pega el código de enlace');return}
+  const r=await api('/api/enlace',{method:'POST',body:JSON.stringify({codigo})});
+  if(r.ok){
+    $('enlace').value='';
+    await analizar();
+    progreso();
+    if(A && A.vigilante && !A.vigilante.instalado){
+      if(confirm('✓ Enlace guardado con éxito.\n\n¿Deseas instalar el Vigilante ahora para que avise automáticamente cualquier cambio de puerto al reiniciar tu equipo?')){
+        await instalarVigilante();
+      }
+    }
+  } else {
+    alert(r.error||'No se pudo guardar');
+  }
+}
+async function instalarVigilante(){
+  const r=await api('/api/vigilante',{method:'POST'});
+  if(!r.ok){alert(r.error||'No se pudo instalar')}else{alert('✓ Vigilante instalado y activado correctamente.');}
+  analizar();
+  progreso();
+}
+async function desinstalarVigilante(){
+  if(!confirm('¿Deseas desinstalar el vigilante automático? Tendrás que avisar a mano los cambios de puerto.')) return;
+  const r=await api('/api/desinstalar-vigilante',{method:'POST'});
+  if(r.ok){
+    analizar();
+    progreso();
+  } else {
+    alert(r.error||'No se pudo desinstalar');
+  }
+}
+async function buscarActualizacion(){
+  const btn=$('btnAct');
+  const txtOriginal=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Buscando…';}
+  try{
+    const r=await api('/api/actualizacion',{method:'POST'});
+    if(!r.ok){
+      alert(r.error||'No se pudo buscar actualizaciones.');
+    }else if(r.nueva){
+      if(confirm('✓ ¡Nueva versión disponible: v'+esc(r.version_nueva)+'!\n(Versión actual: v'+esc(r.version_actual)+')\n\n¿Deseas descargar la actualización ahora?')){
+        window.open(r.zip_url||r.url||'https://github.com/Democresss/FacturaProEC-Admin/releases/latest','_blank');
+      }
+    }else{
+      alert('✓ FacPro Servidor está al día.\nTienes instalada la versión más reciente (v'+esc(r.version_actual)+').');
+    }
+  }catch(e){
+    alert('Error al comprobar actualizaciones: '+(e.message||e));
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent=txtOriginal;}
+  }
+}
 async function avisarAhora(){const r=await api('/api/avisar',{method:'POST'});progreso();if(!r.ok)alert('No se pudo avisar: mira el registro')}
 async function salir(){await api('/api/salir',{method:'POST'});document.body.innerHTML='<main><h2>FacPro Servidor se cerró. Ya puedes cerrar esta pestaña.</h2></main>'}
 analizar();progreso();

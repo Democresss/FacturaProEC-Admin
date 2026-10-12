@@ -58,6 +58,29 @@ function AppInner() {
 
   const goto = useCallback((id: TabId) => setActiveTab(id), []);
 
+  const handleCheckUpdate = useCallback(async () => {
+    toast('Actualizaciones', 'Buscando actualizaciones…', 'info');
+    try {
+      const ea = (window as any).electronAPI;
+      if (ea?.update?.check) {
+        const r = await ea.update.check();
+        if (!r) return;
+        if (!r.ok) toast('Actualizaciones', r.message || 'No se pudo revisar', 'warning');
+        else if (r.version) toast('Actualizaciones', `Hay una versión nueva (${r.version}): se está descargando`, 'success');
+        else toast('Actualizaciones', 'Ya tienes la última versión instalada', 'success');
+      } else {
+        const r = await call('/api/actualizacion', { method: 'POST' });
+        if (r && r.nueva) {
+          toast('Actualizaciones', `Nueva versión disponible: ${r.version_nueva}`, 'success');
+        } else {
+          toast('Actualizaciones', 'Ya tienes la última versión instalada', 'success');
+        }
+      }
+    } catch (e: any) {
+      toast('Actualizaciones', 'Error al buscar: ' + (e?.message || e), 'danger');
+    }
+  }, [toast, call]);
+
   const commands: CommandItem[] = useMemo(() => TABS.map(t => ({
     id: t.id, label: t.label, desc: t.desc, icon: t.icon, run: () => goto(t.id),
   })), [goto]);
@@ -127,6 +150,9 @@ function AppInner() {
         <header className="topbar">
           <div className="topbar-title">{activeDef.icon} {activeDef.label}</div>
           <div className="topbar-spacer" />
+          <button className="btn btn-sm btn-secondary" onClick={handleCheckUpdate} title="Buscar actualizaciones de FacPro Server Manager" style={{ gap: 5, display: 'inline-flex', alignItems: 'center' }}>
+            <span>⬇</span> <span>Buscar actualización</span>
+          </button>
           <CentroAvisos />
           {/* Theme toggle */}
           <div className="segmented">
