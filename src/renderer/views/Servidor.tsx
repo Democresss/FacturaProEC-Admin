@@ -405,6 +405,15 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               </select>
             </div>
           )}
+          {pg.estado === 'contenedor' && bases.length === 0 && (
+            <div className="form-row">
+              <label className="form-label">Base de datos</label>
+              <input className="input" type="text" placeholder="app_v2_db" value={base === NUEVA ? '' : base} onChange={e => setBase(e.target.value)} />
+              <div className="fs-12 text-muted" style={{ marginTop: 4 }}>
+                {pg.error ? `⚠️ ${pg.error}` : 'Escribe el nombre de la base de datos (por ejemplo: app_v2_db)'}
+              </div>
+            </div>
+          )}
           {pideClave && (
             <div className="form-row">
               <label className="form-label">Clave del usuario «{baseSel?.dueno}» (solo se usa en este equipo)</label>

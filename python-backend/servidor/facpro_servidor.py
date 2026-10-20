@@ -904,23 +904,38 @@ def instalar_docker():
 
 # ─────────────────────────────── análisis ───────────────────────────────
 
-def _psql(cont, sql, db="postgres", usuario="postgres", clave=None, solo_tcp=False):
+def _psql(cont, sql, db=None, usuario="postgres", clave=None, solo_tcp=False):
     """psql dentro del contenedor: primero por socket (sin clave), luego por TCP con clave.
-    solo_tcp=True comprueba de verdad la clave (por el socket PostgreSQL suele entrar sin pedirla)."""
+    solo_tcp=True comprueba de verdad la clave (por el socket PostgreSQL suele entrar sin pedirla).
+    Si db es None o 'postgres' y no existe, intenta automáticamente con template1, app_v2_db, facturapro."""
+    bases_probar = []
+    if db and db != "postgres":
+        bases_probar.append(db)
+    for cand in ("template1", "app_v2_db", "facturapro", "postgres"):
+        if cand not in bases_probar:
+            bases_probar.append(cand)
+
     salida = ""
-    for por_tcp in ((True,) if solo_tcp else (False, True)):
-        if por_tcp and not clave:
-            continue
-        cmd = ["exec"]
-        if clave:
-            cmd += ["-e", "PGPASSWORD=" + clave]
-        cmd += [cont, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"]
-        if por_tcp:
-            cmd += ["-h", "127.0.0.1"]
-        cmd += ["-U", usuario, "-d", db, "-Atc", sql]
-        code, salida = dk(*cmd, timeout=60)
-        if code == 0:
-            return True, salida
+    for base_actual in bases_probar:
+        for por_tcp in ((True,) if solo_tcp else (False, True)):
+            if por_tcp and not clave:
+                continue
+            cmd = ["exec"]
+            if clave:
+                cmd += ["-e", "PGPASSWORD=" + clave]
+            cmd += [cont, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"]
+            if por_tcp:
+                cmd += ["-h", "127.0.0.1"]
+            cmd += ["-U", usuario, "-d", base_actual, "-Atc", sql]
+            code, salida = dk(*cmd, timeout=60)
+            if code == 0:
+                return True, salida
+        err_lower = (salida or "").lower()
+        no_existe = any(m in err_lower for m in (
+            "does not exist", "no existe la base de datos", "database \"", "fatal: database", "no existe"
+        ))
+        if not no_existe and db and db != "postgres":
+            break
     return False, salida
 
 
@@ -959,8 +974,10 @@ def _analizar_pg_contenedor(c, candidatos, config):
               "contenedores": [_resumen(x) for x in candidatos], "clave": clave_de(c), "motor": c.get("motor", ""),
               "host": c.get("host", ""), "creado": c.get("creado", "")}
         if pg["corriendo"]:
+            db_conn = db_env or "template1"
             ok, out = _psql(c["nombre"], "select datname, pg_get_userbyid(datdba) from pg_database "
-                                         "where not datistemplate and datname <> 'postgres' order by 1", usuario=usuario, clave=clave)
+                                         "where not datistemplate and datname <> 'postgres' order by 1",
+                            db=db_conn, usuario=usuario, clave=clave)
             if ok:
                 for linea in out.splitlines()[:30]:
                     if "|" in linea:
@@ -969,10 +986,10 @@ def _analizar_pg_contenedor(c, candidatos, config):
                                           db=nombre, usuario=usuario, clave=clave)
                         pg["bases"].append({"nombre": nombre, "dueno": dueno,
                                             "tablas": int(tablas) if str(tablas).strip().isdigit() else None})
-                ok_ssl, ssl = _psql(c["nombre"], "show ssl", usuario=usuario, clave=clave)
+                ok_ssl, ssl = _psql(c["nombre"], "show ssl", db=db_conn, usuario=usuario, clave=clave)
                 pg["ssl"] = (ssl.strip() == "on") if ok_ssl else None
             else:
-                pg["error"] = "No se pudo entrar a PostgreSQL con el usuario «%s»." % usuario
+                pg["error"] = "No se pudo entrar a PostgreSQL con el usuario «%s»: %s" % (usuario, (out or "").strip()[-200:])
         return pg
 
 
@@ -1185,9 +1202,9 @@ def analizar(pg_elegido=None, minio_elegido=None):
 
 # ─────────────────────────────── configuración ───────────────────────────────
 
-def _esperar_postgres(cont, usuario, clave, segundos=90):
+def _esperar_postgres(cont, usuario, clave, segundos=90, db=None):
     for _ in range(segundos // 2):
-        ok, _ = _psql(cont, "select 1", usuario=usuario, clave=clave)
+        ok, _ = _psql(cont, "select 1", db=db or "template1", usuario=usuario, clave=clave)
         if ok:
             return True
         time.sleep(2)
@@ -1314,8 +1331,8 @@ def usuario_propio(cont, admin_usuario, admin_clave, base, dueno):
     ok, existe = _psql(cont, "select 1 from pg_roles where rolname='%s'" % usuario, usuario=admin_usuario, clave=admin_clave)
     sql = ("ALTER ROLE %s LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '%s'" if ok and existe.strip() == "1"
            else "CREATE ROLE %s LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '%s'") % (usuario, q)
-    for sentencia, db in ((sql, "postgres"), ('GRANT "%s" TO %s' % (dueno.replace('"', '""'), usuario), "postgres"),
-                          ('GRANT CONNECT, TEMPORARY ON DATABASE "%s" TO %s' % (base.replace('"', '""'), usuario), "postgres")):
+    for sentencia, db in ((sql, "template1"), ('GRANT "%s" TO %s' % (dueno.replace('"', '""'), usuario), "template1"),
+                          ('GRANT CONNECT, TEMPORARY ON DATABASE "%s" TO %s' % (base.replace('"', '""'), usuario), "template1")):
         ok, out = _psql(cont, sentencia, db=db, usuario=admin_usuario, clave=admin_clave)
         if not ok and "already a member" not in out:
             raise RuntimeError("No se pudo preparar el usuario «%s»: %s" % (usuario, out[-300:]))
@@ -1363,11 +1380,20 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
     # El usuario de la app entra por el túnel; el dueño de la base (sea cual sea su nombre) también, pero SOLO cifrado
     # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
     for red in subredes:
-        bloque += ["host %s %s %s md5" % (base, usuario, red), "hostssl %s %s %s md5" % (base, usuario, red)]
-        bloque += ["host facturapro_02 %s %s md5" % (usuario, red), "hostssl facturapro_02 %s %s md5" % (usuario, red)]
-        if admin_usuario and admin_usuario != usuario:
-            bloque += ["host %s %s %s md5" % (base, admin_usuario, red), "hostssl %s %s %s md5" % (base, admin_usuario, red)]
-            bloque += ["host facturapro_02 %s %s md5" % (admin_usuario, red), "hostssl facturapro_02 %s %s md5" % (admin_usuario, red)]
+        if admin_usuario:
+            bloque += [
+                "host all %s %s scram-sha-256" % (admin_usuario, red),
+                "host all %s %s md5" % (admin_usuario, red),
+                "hostssl all %s %s scram-sha-256" % (admin_usuario, red),
+                "hostssl all %s %s md5" % (admin_usuario, red),
+            ]
+        for b in (base, "facturapro_02", "template1"):
+            bloque += [
+                "host %s %s %s scram-sha-256" % (b, usuario, red),
+                "host %s %s %s md5" % (b, usuario, red),
+                "hostssl %s %s %s scram-sha-256" % (b, usuario, red),
+                "hostssl %s %s %s md5" % (b, usuario, red),
+            ]
         bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
