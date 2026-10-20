@@ -1352,10 +1352,22 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
     """Por el túnel (red de Docker «facpro-red») solo puede entrar el usuario de FacturaPro y solo a su base:
     cualquier otro usuario, por ejemplo el superusuario con una clave débil, queda rechazado desde internet.
     Las conexiones locales y de otras redes de Docker siguen igual."""
-    code, subred = dk("network", "inspect", RED, "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
-    subredes = [x for x in (subred or "").split() if re.match(r"^[0-9a-fA-F.:]+/\d+$", x)]
-    if code != 0 or not subredes:
-        log("No se pudo leer la red «%s»: el túnel no quedó limitado al usuario de FacturaPro." % RED, "aviso")
+    redes_a_revisar = [RED, "siaci-red"]
+    info_cont = inspeccionar(cont)
+    for n in (info_cont.get("NetworkSettings") or {}).get("Networks", {}).keys():
+        if n and n not in redes_a_revisar:
+            redes_a_revisar.append(n)
+
+    subredes = []
+    for r_nom in redes_a_revisar:
+        code_s, sub_out = dk("network", "inspect", r_nom, "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
+        if code_s == 0 and sub_out:
+            for s in sub_out.split():
+                if re.match(r"^[0-9a-fA-F.:]+/\d+$", s) and s not in subredes:
+                    subredes.append(s)
+
+    if not subredes:
+        log("No se pudo leer las subredes de Docker: el túnel no quedó limitado al usuario de FacturaPro.", "aviso")
         return False
     ok, ruta = _psql(cont, "show hba_file", usuario=admin_usuario, clave=admin_clave)
     ruta = (ruta or "").strip()

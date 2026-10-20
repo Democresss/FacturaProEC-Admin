@@ -62,6 +62,9 @@ function bumpVersion(kind) {
 
 /* ─── 2. Build (TS main + renderer Vite) ─── */
 function build() {
+  log('Compilando backend Python (PyInstaller -> dist-bridge/facpro-bridge.exe)…');
+  const py = spawnSync('python', ['scripts/build_bridge.py'], { cwd: ROOT, stdio: 'inherit', shell: true });
+  if (py.status !== 0) throw new Error('Compilación del bridge falló');
   log('Compilando TypeScript (main + renderer)…');
   const r = spawnSync('npm.cmd', ['run', 'build'], { cwd: ROOT, stdio: 'inherit', shell: true });
   if (r.status !== 0) throw new Error('npm run build falló');
