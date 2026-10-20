@@ -86,7 +86,20 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     setA(d);
     const bases: Base[] = d.postgres?.bases || [];
     setBase(prev => (prev && (prev === NUEVA || bases.some(b => b.nombre === prev))) ? prev : (bases[0]?.nombre || NUEVA));
-    const previo = (d.bore?.contenedores || []).find((t: Tunel) => t.puerto)?.puerto || d.config?.bore_puerto_pg;
+    const esTunelPg = (item: any) => {
+      const nombre = String(item?.contenedor || item?.nombre || item?.cmd || '').toLowerCase();
+      const destino = Number(item?.destino || 0);
+      if (nombre.includes('minio') || [9000, 9001, 9443].includes(destino)) {
+        return false;
+      }
+      return destino === 5432 || nombre.includes('postgres') || Boolean(item?.es_pg);
+    };
+
+    const previo =
+      (d.bore?.contenedores || []).find((t: Tunel) => esTunelPg(t) && t.puerto)?.puerto ||
+      (d.bore?.procesos || []).find((p: any) => esTunelPg(p) && p.puerto)?.puerto ||
+      d.config?.bore_puerto_pg;
+
     setPuerto(p => p || (previo ? String(previo) : ''));
   }, [call, toast]);
 

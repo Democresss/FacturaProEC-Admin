@@ -76,10 +76,37 @@ def _pedir_admin(clave: Optional[str] = None):
     return fs._abrir_como_admin
 
 
+def _normalizar_tunel(item: Any) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return item
+    d = dict(item)
+    destino_val = d.get("destino")
+    if destino_val is not None:
+        try:
+            d["destino"] = int(destino_val)
+        except (ValueError, TypeError):
+            pass
+    nombre = str(d.get("contenedor") or d.get("nombre") or d.get("comando") or "").lower()
+    destino_num = d.get("destino") if isinstance(d.get("destino"), int) else 0
+    d["es_pg"] = bool(d.get("es_pg") or destino_num == 5432 or ("postgres" in nombre and "minio" not in nombre))
+    return d
+
+
 def _sin_claves(resultado: Any) -> Any:
     """La dirección con la clave solo sale en el resultado de «configurar» (para copiarla); nunca en el análisis."""
-    if isinstance(resultado, dict) and isinstance(resultado.get("conexion"), dict):
-        resultado = dict(resultado, conexion={k: v for k, v in resultado["conexion"].items() if k != "url"})
+    if isinstance(resultado, dict):
+        res = dict(resultado)
+        if isinstance(res.get("conexion"), dict):
+            res["conexion"] = {k: v for k, v in res["conexion"].items() if k != "url"}
+        bore = res.get("bore")
+        if isinstance(bore, dict):
+            bore_copia = dict(bore)
+            if "contenedores" in bore_copia and isinstance(bore_copia["contenedores"], list):
+                bore_copia["contenedores"] = [_normalizar_tunel(c) for c in bore_copia["contenedores"]]
+            if "procesos" in bore_copia and isinstance(bore_copia["procesos"], list):
+                bore_copia["procesos"] = [_normalizar_tunel(p) for p in bore_copia["procesos"]]
+            res["bore"] = bore_copia
+        return res
     return resultado
 
 

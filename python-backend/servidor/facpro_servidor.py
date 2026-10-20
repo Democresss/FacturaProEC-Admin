@@ -419,26 +419,24 @@ def elegir_docker():
     candidatos = _motores_candidatos()
     guardado = leer_config().get("docker_host")
     if guardado is not None:
+        # El Docker que ELEGISTE se respeta aunque todavía no responda (p. ej. Docker Desktop arrancando al encender
+        # el equipo): cambiarse a otro en ese momento mostraba el Docker vacío del sistema y los servicios de la
+        # empresa como «no instalados». Solo si ese Docker niega el permiso se buscan los demás.
         if guardado == "":
-            n_def, sin_p_def = _probar_motor("")
-            if not sin_p_def and n_def >= 0:
+            _n_def, sin_p_def = _probar_motor("")
+            if not sin_p_def:
                 return
         else:
-            for nombre, host in candidatos:
-                if host == guardado:
-                    n_g, sin_p_g = _probar_motor(host)
-                    if not sin_p_g and n_g >= 0:
-                        os.environ["DOCKER_HOST"] = host
-                        _MOTOR["nombre"] = nombre
-                        return
-                    break
-            if "/.docker/desktop/" in guardado or "docker-desktop" in guardado:
-                n_g, sin_p_g = _probar_motor(guardado)
-                if not sin_p_g and n_g >= 0:
+            nombre_g = next((n for n, h in candidatos if h == guardado), None)
+            if nombre_g is None and ("/.docker/desktop/" in guardado or "docker-desktop" in guardado):
+                nombre_g = "Docker Desktop"
+            if nombre_g is not None:
+                _n_g, sin_p_g = _probar_motor(guardado)
+                if not sin_p_g:
                     os.environ["DOCKER_HOST"] = guardado
-                    _MOTOR["nombre"] = "Docker Desktop"
+                    _MOTOR["nombre"] = nombre_g
                     return
-        # Si el motor guardado da error de permisos o no responde, no bloquearse: evaluar todos los candidatos
+        # El guardado niega el permiso (o ya no existe en este equipo): evaluar todos los candidatos
     if not candidatos:
         return
     mejor, cuantos = None, -1
@@ -999,12 +997,31 @@ def analizar_minio(lista, elegido=None, config=None):
     return {"estado": "no"}
 
 
+_PUERTOS_INTERNOS_EXCLUIDOS = {5432, 5433, 7835, 9000, 9001, 9443}
+
+
 def _puerto_bore_de_logs(nombre):
-    code, out = dk("logs", "--tail", "80", nombre, timeout=30)
-    out = re.sub(r"\x1b\[[0-9;]*m", "", out or "")  # bore escribe con colores
-    puertos = re.findall(r"listening at [\w.\-]+:(\d+)|remote_port=(\d+)", out or "")
-    ultimo = next((a or b for a, b in reversed(puertos) if a or b), None)
-    return int(ultimo) if ultimo else None, out or ""
+    code, out = dk("logs", "--tail", "100", nombre, timeout=30)
+    # Limpieza total de secuencias ANSI (colores, cursor, borrado de línea) y control
+    out = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", out or "")
+    out = (out or "").replace("\r", "\n")
+
+    coincidencias = re.findall(
+        r"(?:listening at|listening on|bound to|tunnel established:?)\s*[\w.\-]*:(\d{4,5})\b|"
+        r"(?:remote_port=|remote port:?\s*)(\d{4,5})\b|"
+        r'"remote_port":\s*(\d{4,5})\b',
+        out,
+        re.I,
+    )
+
+    for grupo in reversed(coincidencias):
+        for valor in grupo:
+            if valor and valor.isdigit():
+                puerto = int(valor)
+                if 1024 <= puerto <= 65535 and puerto not in _PUERTOS_INTERNOS_EXCLUIDOS:
+                    return puerto, out
+
+    return None, out
 
 
 def _proc_leer(pid, archivo):
@@ -1109,16 +1126,19 @@ def analizar_bore(lista):
                 puerto, _ = _puerto_bore_de_logs(c["nombre"]) if c["estado"] == "running" else (None, "")
                 args = " ".join(((inspeccionar(c["nombre"]).get("Config") or {}).get("Cmd") or []))
             puerto = puerto or _puerto_de_args(args)
-            destino = re.search(r"local (\d+)", args)
+            destino_m = re.search(r"local (\d+)", args)
+            destino_val = int(destino_m.group(1)) if destino_m else (5432 if c["nombre"] == C_BORE_PG else (9443 if c["nombre"] == C_BORE_MINIO else None))
             t = {"contenedor": c["nombre"], "corriendo": c["estado"] == "running", "puerto": puerto,
-                 "destino": int(destino.group(1)) if destino else None, "args": args,
-                 "motor": c.get("motor", ""), "host": c.get("host", "")}
+                 "destino": destino_val, "args": args,
+                 "motor": c.get("motor", ""), "host": c.get("host", ""),
+                 "es_pg": (destino_val == 5432 or c["nombre"] == C_BORE_PG)}
             t.update(_estado_tunel(puerto, t["destino"]))
             tuneles.append(t)
     procesos = procesos_bore()
     for p in procesos:
-        destino = re.search(r"local (\d+)", p.get("comando") or "")
-        p["destino"] = int(destino.group(1)) if destino else None
+        destino_m = re.search(r"local (\d+)", p.get("comando") or "")
+        p["destino"] = int(destino_m.group(1)) if destino_m else 5432
+        p["es_pg"] = (p["destino"] == 5432)
         p.update(_estado_tunel(p.get("puerto"), p["destino"]))
     otros = []
     if not any(c.get("host") for c in lista):   # con varios Docker, «lista» ya los trae todos
@@ -1344,8 +1364,10 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
     # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
     for red in subredes:
         bloque += ["host %s %s %s md5" % (base, usuario, red), "hostssl %s %s %s md5" % (base, usuario, red)]
+        bloque += ["host facturapro_02 %s %s md5" % (usuario, red), "hostssl facturapro_02 %s %s md5" % (usuario, red)]
         if admin_usuario and admin_usuario != usuario:
             bloque += ["host %s %s %s md5" % (base, admin_usuario, red), "hostssl %s %s %s md5" % (base, admin_usuario, red)]
+            bloque += ["host facturapro_02 %s %s md5" % (admin_usuario, red), "hostssl facturapro_02 %s %s md5" % (admin_usuario, red)]
         bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
@@ -1542,7 +1564,11 @@ def informar_archivos(minio, config=None):
     return True
 
 
-_BORE_PUERTO_OCUPADO = r"already in use|port .* not available|address in use"
+_BORE_PUERTO_OCUPADO = (
+    r"already in use|port .* not available|address in use|failed to bind|connection reset|"
+    r"rejected|unavailable|already bound|failed to reserve|stream closed|broken pipe|"
+    r"connection refused|timed out|eof"
+)
 # El contenedor del túnel pregunta a DNS públicos: hay redes cuyo DNS (router, proveedor o filtro) responde que bore.pub
 # «no existe» aunque el resto de internet funcione (pasó en el servidor de Harpicorp, 7-oct-2026).
 DNS_TUNEL = ("1.1.1.1", "8.8.8.8")
@@ -1576,11 +1602,18 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
         preferido = None
     intentos = [int(preferido)] if preferido else []
     intentos += [random.randint(*PUERTOS_BORE) for _ in range(5)]
-    for puerto in intentos:
+    if 0 not in intentos:
+        intentos = list(intentos) + [0]
+
+    for i, puerto in enumerate(intentos):
+        dk("rm", "-f", nombre)
         args = ["run", "-d", "--name", nombre, "--network", RED, "--restart", "always"] + (extra or [])
         for dns in DNS_TUNEL:
             args += ["--dns", dns]
-        args += [IMG_BORE, "local", str(destino_puerto), "--local-host", destino_host, "--to", BORE_HOST, "--port", str(puerto)]
+        args += [IMG_BORE, "local", str(destino_puerto), "--local-host", destino_host, "--to", BORE_HOST]
+        if puerto and int(puerto) > 0:
+            args.extend(["--port", str(puerto)])
+
         code, out = dk(*args, timeout=600)
         if code != 0:
             raise RuntimeError("No se pudo crear el túnel: %s" % out[-300:])
@@ -1591,16 +1624,17 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
             if asignado:
                 log("Túnel activo: %s:%d → %s:%d" % (BORE_HOST, asignado, destino_host, destino_puerto), "ok")
                 return asignado
-            if re.search(r"error", logs, re.I):
+            # Cortar espera solo si hay un error fatal de bore o de resolución
+            if re.search(r"(?:error|fatal|panicked)", logs, re.I):
                 break
         dk("rm", "-f", nombre)
-        if re.search(_BORE_PUERTO_OCUPADO, logs, re.I):
-            log("El puerto %d de bore.pub está ocupado; probando otro…" % puerto, "aviso")
+        es_ocupado = bool(re.search(_BORE_PUERTO_OCUPADO, logs, re.I))
+        es_error_dns = bool(re.search(r"resolve|lookup|dns|no such host", logs, re.I))
+        if (es_ocupado or i < len(intentos) - 1) and not es_error_dns:
+            log("El puerto %s de %s está ocupado o no disponible; probando otro…" % (puerto or "dinámico", BORE_HOST), "aviso")
             continue
         raise RuntimeError(motivo_bore(logs))
     raise RuntimeError("bore.pub tenía ocupados los %d puertos probados. Intenta de nuevo en unos minutos." % len(intentos))
-
-
 #: Opciones de «Configurar todo» que se pueden repetir solas (nunca claves)
 _OPCIONES_REPETIBLES = ("base", "minio", "puerto", "pg_contenedor", "minio_contenedor")
 _RECONFIGURANDO = threading.Lock()
@@ -2037,6 +2071,8 @@ def reparar_tunel(config=None):
         destino_host, destino_puerto, extra = _destino_tunel(C_BORE_PG)
     else:
         destino_host, destino_puerto, extra = (pg or C_PG), 5432, None
+        if not ES_WINDOWS and (pg is None or destino_host == 'host.docker.internal'):
+            extra = ['--add-host', 'host.docker.internal:host-gateway']
     try:
         puerto = levantar_bore(C_BORE_PG, destino_host, destino_puerto, anterior, extra)
     except RuntimeError as e:
@@ -3005,6 +3041,7 @@ def _en_hilo(tarea, funcion, *args):
 
 def comprobar_actualizacion():
     """Consulta si hay una versión más nueva en GitHub o FacturaPro."""
+    import urllib.request
     url_api = "https://api.github.com/repos/Democresss/FacturaProEC-Admin/releases/latest"
     url_descarga_fp = "https://facturapro-ec-463201559114.us-central1.run.app/static/downloads/FacPro-Servidor.zip"
     try:
@@ -4050,8 +4087,16 @@ function pintar(){
     ob='<label>Base de datos para FacturaPro</label><select id="base" onchange="pedirClave()">'+pg.bases.map(b=>`<option value="${esc(b.nombre)}" data-dueno="${esc(b.dueno)}">${esc(b.nombre)} — ${b.tablas??'?'} tablas (dueño ${esc(b.dueno)})</option>`).join('')+'<option value="__nueva__">➕ Crear base nueva «facturapro»</option></select><div id="filaClave" class="oculto"><label id="lblClave"></label><input id="claveBase" type="password"></div>';
   }else if(pg.estado==='no'){ob='<p class="nota">Se creará PostgreSQL 17 con la base «facturapro» y una clave nueva.</p>'}
   $('opBase').innerHTML=ob;$('opNativo').classList.toggle('oculto',pg.estado!=='nativo');
-  const previo=(bo.procesos||[]).find(p=>p.puerto)||(bo.contenedores||[]).find(c=>c.puerto);
-  if(previo&&!$('puerto').value)$('puerto').value=previo.puerto;
+  const esTunelPg=(item)=>{
+    const n=String(item?.contenedor||item?.nombre||item?.comando||item?.cmd||'').toLowerCase();
+    const d=Number(item?.destino||0);
+    if(n.includes('minio')||[9000,9001,9443].includes(d))return false;
+    return d===5432||n.includes('postgres')||Boolean(item?.es_pg);
+  };
+  const previo=(bo.contenedores||[]).find(c=>esTunelPg(c)&&c.puerto)?.puerto
+    ||(bo.procesos||[]).find(p=>esTunelPg(p)&&p.puerto)?.puerto
+    ||(A.config&&A.config.bore_puerto_pg);
+  if(previo&&!$('puerto').value)$('puerto').value=previo;
   if(A.config&&A.config.bore_puerto_pg&&!$('puerto').value)$('puerto').value=A.config.bore_puerto_pg;
   $('filaBore').classList.toggle('oculto',!(bo.procesos||[]).length);
   $('txtBore').textContent='Reemplazar el bore que corre fuera de Docker por uno que arranca solo tras cada reinicio';
