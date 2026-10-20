@@ -1,0 +1,4 @@
+{"version": "2.3.33", "commit": "2d8b7167876759592a01ebb66890408ed7fe85a2", "ref": "v2.3.33", "run": "39362697243",
+ "backend_linux": "success", "backend_windows": "success",
+ "app_linux": "success", "app_windows": "success",
+ "archivos": [{"mb":115,"nombre":"FacturaProEC-Admin-2.3.33-linux-amd64.deb"},{"mb":141,"nombre":"FacturaProEC-Admin-2.3.33-linux-x64.tar.gz"},{"mb":147,"nombre":"FacturaProEC-Admin-2.3.33-linux-x86_64.AppImage"},{"mb":115,"nombre":"FacturaProEC-Admin-2.3.33-linux-x86_64.rpm"},{"mb":96,"nombre":"FacturaProEC-Admin-2.3.33-win-x64.exe"},{"mb":0,"nombre":"latest-linux.yml"},{"mb":0,"nombre":"latest.yml"}]}
