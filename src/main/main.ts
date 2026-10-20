@@ -102,6 +102,12 @@ function resolveBridgeScript(): string {
  * Es lo que hace que la app funcione en cualquier Linux y en Windows 10/11 sin instalar nada.
  */
 function resolveFrozenBridge(): string | null {
+  // En Windows preferimos el python-runtime embebido si existe, porque arranca de inmediato (1 s)
+  // sin sufrir la descompresión temporal de PyInstaller que los antivirus del servidor bloquean o demoran.
+  const runtimeExe = path.join(RESOURCES, 'python-runtime', 'python.exe');
+  if (process.platform === 'win32' && fs.existsSync(runtimeExe)) {
+    return null;
+  }
   const exe = process.platform === 'win32' ? 'facpro-bridge.exe' : 'facpro-bridge';
   const candidates = [
     path.join(RESOURCES, 'bridge', exe),           // app instalada
@@ -162,9 +168,9 @@ function startBridge(): Promise<number> {
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        reject(new Error('El servidor interno de la app no respondió en 45 segundos (el antivirus puede estar revisándolo o bloqueándolo).'));
+        reject(new Error('El servidor interno de la app no respondió en 90 segundos (el antivirus puede estar revisándolo o bloqueándolo).'));
       }
-    }, 45000);
+    }, 90000);
 
     bridgeProcess.stdout?.on('data', (data: Buffer) => {
       const text = data.toString();

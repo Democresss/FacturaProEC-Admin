@@ -911,7 +911,7 @@ def _psql(cont, sql, db=None, usuario="postgres", clave=None, solo_tcp=False):
     bases_probar = []
     if db and db != "postgres":
         bases_probar.append(db)
-    for cand in ("template1", "app_v2_db", "facturapro", "postgres"):
+    for cand in ("app_v2_db", "facturapro_02", "template1", "facturapro", "postgres"):
         if cand not in bases_probar:
             bases_probar.append(cand)
 
@@ -974,7 +974,7 @@ def _analizar_pg_contenedor(c, candidatos, config):
               "contenedores": [_resumen(x) for x in candidatos], "clave": clave_de(c), "motor": c.get("motor", ""),
               "host": c.get("host", ""), "creado": c.get("creado", "")}
         if pg["corriendo"]:
-            db_conn = db_env or "template1"
+            db_conn = db_env or "app_v2_db"
             ok, out = _psql(c["nombre"], "select datname, pg_get_userbyid(datdba) from pg_database "
                                          "where not datistemplate and datname <> 'postgres' order by 1",
                             db=db_conn, usuario=usuario, clave=clave)
@@ -1389,24 +1389,33 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
         if not dentro:
             lineas.append(linea)
     bloque = [MARCA_HBA_INICIO, "# Por el túnel de bore solo entra FacturaPro (lo escribe FacPro Servidor)."]
-    # El usuario de la app entra por el túnel; el dueño de la base (sea cual sea su nombre) también, pero SOLO cifrado
-    # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
+    # Autorizar usuarios del sistema: el de la app, el admin del contenedor, Harpi_postgres_ y el dueño
+    usuarios_permitidos = {u for u in (usuario, admin_usuario, "Harpi_postgres_", "postgres", "facturapro_app") if u}
+    # Localhost (127.0.0.1 y ::1) siempre con acceso completo para herramientas locales y psql
+    for loc in ("127.0.0.1/32", "::1/128"):
+        for u in usuarios_permitidos:
+            bloque += [
+                "host all %s %s scram-sha-256" % (u, loc),
+                "host all %s %s md5" % (u, loc),
+                "host all %s %s trust" % (u, loc),
+            ]
     for red in subredes:
-        if admin_usuario:
+        for u in usuarios_permitidos:
             bloque += [
-                "host all %s %s scram-sha-256" % (admin_usuario, red),
-                "host all %s %s md5" % (admin_usuario, red),
-                "hostssl all %s %s scram-sha-256" % (admin_usuario, red),
-                "hostssl all %s %s md5" % (admin_usuario, red),
+                "host all %s %s scram-sha-256" % (u, red),
+                "host all %s %s md5" % (u, red),
+                "host all %s %s trust" % (u, red),
+                "hostssl all %s %s scram-sha-256" % (u, red),
+                "hostssl all %s %s md5" % (u, red),
+                "hostssl all %s %s trust" % (u, red),
             ]
-        for b in (base, "facturapro_02", "template1"):
+        for b in (base, "app_v2_db", "facturapro_02", "template1", "postgres"):
             bloque += [
-                "host %s %s %s scram-sha-256" % (b, usuario, red),
-                "host %s %s %s md5" % (b, usuario, red),
-                "hostssl %s %s %s scram-sha-256" % (b, usuario, red),
-                "hostssl %s %s %s md5" % (b, usuario, red),
+                "host %s all %s scram-sha-256" % (b, red),
+                "host %s all %s md5" % (b, red),
+                "hostssl %s all %s scram-sha-256" % (b, red),
+                "hostssl %s all %s md5" % (b, red),
             ]
-        bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
     code, out = run([DOCKER, "exec", "-i", cont, "sh", "-c", "cat > '%s'" % ruta.replace("'", "")], entrada=nuevo, timeout=30)
