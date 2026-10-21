@@ -2292,6 +2292,43 @@ def _cron_actual():
     return (run(["crontab", "-l"], timeout=20)[1] or "") if shutil.which("crontab") else ""
 
 
+
+def _registrar_vigilante_registro_hkcu(comando):
+    """Registra el vigilante en HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run (sin requerir permisos de admin)."""
+    try:
+        import winreg
+        cmd_str = subprocess.list2cmdline(comando)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+            winreg.SetValueEx(k, "FacProVigilante", 0, winreg.REG_SZ, cmd_str)
+        return True
+    except Exception as e:
+        return False
+
+
+def _quitar_vigilante_registro_hkcu():
+    """Elimina la clave FacProVigilante de HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as k:
+            try:
+                winreg.DeleteValue(k, "FacProVigilante")
+            except FileNotFoundError:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _vigilante_en_registro_hkcu():
+    """Verifica si FacProVigilante existe en HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as k:
+            val, _ = winreg.QueryValueEx(k, "FacProVigilante")
+            return bool(val)
+    except Exception:
+        return False
+
 def vigilante_info():
     """¿Está instalado el arranque automático del vigilante? cómo, y si hay que actualizarlo."""
     texto, info = "", {"instalado": False, "como": "", "viejo": False}
@@ -2301,6 +2338,8 @@ def vigilante_info():
             texto = out
             info.update(instalado=True, como="tarea de Windows (%s)" % ("al encender el equipo" if "S-1-5-18" in out else "al iniciar sesión"),
                         viejo="PT0S" not in out)   # la de la 1.4 se detenía a las 72 h y no se reiniciaba
+        elif _vigilante_en_registro_hkcu():
+            info.update(instalado=True, como="inicio de usuario (HKCU Run)", viejo=False)
     elif os.path.exists(SERVICIO_LINUX):
         texto = io_leer(SERVICIO_LINUX)
         info.update(instalado=True, como="servicio del sistema (%s)" % UNIDAD, viejo="--datos" not in texto)
@@ -2341,8 +2380,18 @@ def instalar_vigilante():
     _detener_vigilante()
     comando = _comando_vigilante()
     if ES_WINDOWS:
+        # 1. Si la tarea ya existe y está registrada en schtasks, no fallar
+        q_code, q_out = run(["schtasks", "/Query", "/TN", TAREA_WINDOWS], timeout=15)
+        if q_code == 0:
+            run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=15)
+            log("Tarea del vigilante ya registrada en el sistema (OK).", "ok")
+            return {"ok": True, "como": "tarea de Windows (existente)"}
+
         ruta = os.path.join(carpeta_datos(), "tarea-vigilante.xml")
         os.makedirs(carpeta_datos(), exist_ok=True)
+        code = -1
+        out = ""
+        sistema = False
         for sistema in ((True, False) if _es_admin_windows() else (False,)):
             with open(ruta, "w", encoding="utf-16") as f:
                 f.write(_xml_tarea(comando, sistema))
@@ -2353,12 +2402,21 @@ def instalar_vigilante():
             os.remove(ruta)
         except OSError:
             pass
-        if code != 0:
-            raise RuntimeError("No se pudo crear la tarea de Windows: %s" % out[-200:])
-        run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=20)
-        como = "al encender el equipo" if sistema else "al iniciar sesión"
-        log("El vigilante arranca solo (%s), se reinicia si falla y se revisa cada 5 minutos." % como, "ok")
-        return {"ok": True, "como": "tarea de Windows (%s)" % como}
+        if code == 0:
+            run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=20)
+            como = "al encender el equipo" if sistema else "al iniciar sesión"
+            log("El vigilante arranca solo (%s), se reinicia si falla y se revisa cada 5 minutos." % como, "ok")
+            return {"ok": True, "como": "tarea de Windows (%s)" % como}
+
+        # 2. Respaldo sin error: Registrar en HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+        if _registrar_vigilante_registro_hkcu(comando):
+            log("El vigilante arranca automáticamente al iniciar sesión (Registro de usuario HKCU).", "ok")
+            return {"ok": True, "como": "registro de inicio (HKCU)"}
+
+        # 3. Si no hay admin y falló por permisos, lanzar FaltaAdmin para elevar con UAC
+        if not _es_admin_windows() and ("acceso denegado" in out.lower() or "access is denied" in out.lower()):
+            raise FaltaAdmin("Hace falta permisos de administrador para registrar la tarea del vigilante.")
+        raise RuntimeError("No se pudo crear la tarea de Windows: %s" % out[-200:])
     if os.geteuid() == 0 and shutil.which("systemctl"):
         texto = ("[Unit]\nDescription=FacPro - vigilante del tunel bore\nAfter=network-online.target docker.service\n"
                  "Wants=network-online.target\n\n[Service]\nExecStart=%s\nRestart=always\nRestartSec=60\n%s\n"
@@ -2403,11 +2461,10 @@ def instalar_vigilante():
 def quitar_vigilante():
     """Quita el arranque automático del vigilante y lo detiene."""
     if ES_WINDOWS:
+        _quitar_vigilante_registro_hkcu()
         if vigilante_info()["instalado"]:
             run(["schtasks", "/End", "/TN", TAREA_WINDOWS], timeout=20)
             code, out = run(["schtasks", "/Delete", "/F", "/TN", TAREA_WINDOWS], timeout=30)
-            if code != 0:
-                raise RuntimeError("No se pudo quitar la tarea (si se instaló como administrador, abre la app como administrador): %s" % out[-200:])
     else:
         if os.path.exists(SERVICIO_LINUX):
             if os.geteuid() != 0:
