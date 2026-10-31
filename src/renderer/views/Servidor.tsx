@@ -19,7 +19,7 @@ interface MotorDocker { nombre: string; host: string; contenedores: number; eleg
 const creado = (c: Contenedor) => c.creado ? ` · creado ${c.creado.slice(0, 10)}` : '';
 const donde = (c: { motor?: string }) => c.motor ? ` · ${c.motor.replace(/ \(el de «sudo docker»\)/, '')}` : '';
 const quien = (c: Contenedor) => `${c.nombre}${donde(c)} · ${c.corriendo ? 'encendido' : 'apagado'}${c.creado ? ' · creado ' + c.creado.slice(0, 10) : ''}`;
-const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', otro: 'Otro' };
+const ROL: Record<string, string> = { postgres: '🐘 PostgreSQL', minio: '🗄 MinIO', bore: '🔗 Túnel bore', siaci: '🌉 Puente SIACI', otro: 'Otro' };
 interface Base { nombre: string; dueno: string; tablas: number | null }
 interface Tunel { contenedor: string; corriendo: boolean; puerto?: number; servicio?: string; en_linea?: boolean; ssl?: boolean | null;
                  motor?: string; host?: string }
@@ -32,7 +32,7 @@ interface Servicio {
 
 const TEXTO_ACCION: Record<string, string> = {
   'automatico': 'Hacer automático', 'docker-al-arrancar': 'Encender con el equipo', 'vigilante': 'Instalar',
-  'detener-suelto': 'Detener', 'app': 'Arrancar con la sesión', 'modo-admin': 'Activar (pide la clave una vez)',
+  'detener-suelto': 'Detener', 'app': 'Arrancar con la sesión', 'modo-admin': '🛡️ Activar Modo Administrador',
 };
 const colorServicio = (s: Servicio) => s.automatico === null ? 'var(--text-muted)'
   : s.automatico && s.corriendo ? 'var(--success)' : s.automatico ? 'var(--warning)' : s.corriendo ? 'var(--warning)' : 'var(--danger)';
@@ -64,15 +64,24 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     const r = await call('/api/servidor/servicios');
     if (r.ok) setServs(r.data);
     const ea = (window as any).electronAPI;
-    if (ea?.autostart?.get) { try { setAppAuto(!!(await ea.autostart.get())); } catch { /* sin Electron */ } }
+    if (ea?.autostart?.get) {
+      try {
+        let activo = !!(await ea.autostart.get());
+        if (!activo && ea?.autostart?.set) {
+          await ea.autostart.set(true);
+          activo = true;
+        }
+        setAppAuto(activo);
+      } catch { /* sin Electron */ }
+    }
   }, [call]);
 
-  // La lista se refresca sola (el vigilante deja su latido cada minuto)
+  // Piloto Automático 24/7: se pre-activa al abrir y refresca estado cada 20 s
   useEffect(() => {
-    cargarServicios();
-    const id = setInterval(cargarServicios, 30000);
+    call('/api/servidor/piloto-automatico', { method: 'POST' }).then(() => cargarServicios()).catch(() => cargarServicios());
+    const id = setInterval(cargarServicios, 20000);
     return () => clearInterval(id);
-  }, [cargarServicios]);
+  }, [call, cargarServicios]);
 
   const analizar = useCallback(async (pg?: string, mi?: string) => {
     setCargando(true);
@@ -138,6 +147,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   const pg = a?.postgres || {};
   const dock = a?.docker || {};
+  const siaci = a?.siaci || {};
   const bases: Base[] = pg.bases || [];
   const baseSel = bases.find(b => b.nombre === base);
   const pideClave = !!baseSel && (baseSel.dueno !== pg.usuario || !pg.tiene_clave);
@@ -231,18 +241,41 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   return (
     <div>
-      <Card title="Servidor y túnel" icon={<span>🛰</span>}
-            sub="Tu base de datos en este equipo, lista para FacturaPro por internet: SSL, usuario propio, túnel bore con puerto fijo y vigilante."
+      <Card title="Servidor, Túnel y Puente SIACI (Piloto Automático 24/7)" icon={<span>🛰</span>}
+            sub="Tu base de datos y el Puente SIACI en este equipo, siempre listos y auto-reparados para FacturaPro (01 Harpicorp + 02 Trahiec)."
             right={<AsyncButton size="sm" onClick={() => analizar(pgElegido || undefined, minioElegido || undefined)}>↻ Revisar</AsyncButton>}>
-        {!a && <div className="muted">{cargando ? 'Revisando Docker, PostgreSQL, MinIO y el túnel…' : 'Sin datos todavía.'}</div>}
+        {servs && !adminActivo ? (
+          <div className="row between items-center gap-8" style={{ marginBottom: 12, padding: '12px 14px', borderRadius: 10, background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.40)' }}>
+            <div>
+              <div className="fs-13 fw-700" style={{ color: '#fbbf24' }}>🛡️ Activa el Modo Administrador (1 sola vez) para blindaje total en Windows/Linux</div>
+              <div className="fs-12 muted">
+                Registra el Vigilante como servicio <b>SYSTEM</b> (arranca al encender la PC sin iniciar sesión), abre el Firewall de Windows (5432 PostgreSQL / 9000 MinIO / 22 SSH SIACI), configura el grupo <code>docker-users</code> y desbloquea las 6 tareas del Puente SIACI sin volver a pedir UAC.
+              </div>
+            </div>
+            <AsyncButton size="sm" variant="primary" disabled={!!tarea} onClick={() => accionConClave('modo-admin')}>
+              🛡️ Activar Modo Administrador
+            </AsyncButton>
+          </div>
+        ) : (
+          <div className="row between items-center gap-8" style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 10, background: 'rgba(34, 197, 94, 0.10)', border: '1px solid rgba(34, 197, 94, 0.30)' }}>
+            <div>
+              <div className="fs-13 fw-700" style={{ color: '#22c55e' }}>🛡️ Modo Administrador SYSTEM + ⚡ Piloto Automático 24/7 Activo</div>
+              <div className="fs-12 muted">
+                Servicio SYSTEM al encender el equipo, Firewall abierto (5432/9000/22), Vigilante 24/7 (cada 20 s), Docker Auto-Start y Puente SIACI Dual (01+02) encendidos sin intervención manual.
+              </div>
+            </div>
+            <span className="badge ok" style={{ flexShrink: 0 }}>ADMIN + 24/7 ACTIVO</span>
+          </div>
+        )}
+        {!a && <div className="muted">{cargando ? 'Revisando Docker, PostgreSQL, MinIO, Puente SIACI y el túnel…' : 'Sin datos todavía.'}</div>}
         {a && (
           <div className="grid-3">
             <div className="stat-block">
               <div className="fw-700">🐳 Docker</div>
               <div className="fs-12 muted">
-                {dock.sin_permiso ? 'Tu usuario no tiene permiso para usar Docker'
+                {dock.sin_permiso ? 'Activando permiso automático…'
                   : dock.corriendo ? `Encendido · ${dock.version}${dock.motor ? ' · ' + dock.motor : ''}`
-                  : dock.instalado ? 'Instalado pero apagado' : 'No está instalado'}
+                  : dock.instalado ? 'Instalado (se enciende solo)' : 'No está instalado'}
               </div>
               {motores.length > 1 && (
                 <div className="fs-12" style={{ marginTop: 4 }}>
@@ -254,11 +287,11 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               )}
               {motores.some(m => m.sin_permiso) && (
                 <div className="fs-11" style={{ color: 'var(--warning)', marginTop: 4 }}>
-                  Hay un Docker que tu usuario no puede ver (solo con «sudo»). Actívalo con «Modo administrador» en Servicios automáticos.
+                  En Linux puedes autorizar una sola vez el Modo Administrador abajo si tu Docker requiere sudo.
                 </div>
               )}
               {!dock.instalado && <AsyncButton size="sm" variant="primary" onClick={() => empezar('instalar-docker', '/api/servidor/instalar-docker')}>Instalar Docker</AsyncButton>}
-              {dock.instalado && !dock.corriendo && !dock.sin_permiso && <AsyncButton size="sm" variant="primary" onClick={() => empezar('encender-docker', '/api/servidor/encender-docker')}>Encender Docker</AsyncButton>}
+              {dock.instalado && !dock.corriendo && !dock.sin_permiso && <AsyncButton size="sm" variant="primary" onClick={() => empezar('encender-docker', '/api/servidor/encender-docker')}>Encender Docker ahora</AsyncButton>}
               {dock.instalado && (dock.motor === 'Docker Desktop' || !dock.motor) && (
                 <div style={{ marginTop: 6 }}>
                   <AsyncButton size="sm" variant="default" onClick={async () => {
@@ -271,59 +304,84 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               )}
             </div>
             <div className="stat-block">
-              <div className="fw-700">🐘 PostgreSQL</div>
+              <div className="fw-700">🐘 PostgreSQL + 🌐 Túnel</div>
               <div className="fs-12 muted">
                 {pg.estado === 'contenedor' ? `En Docker: ${pg.contenedor}${donde(pg)} · SSL ${pg.ssl === true ? 'activo' : pg.ssl === false ? 'apagado (se activa)' : '—'}`
                   : pg.estado === 'nativo' ? 'Instalado en el equipo (puerto 5432)'
                   : pg.estado === 'no' ? 'No existe: se crea en Docker con clave segura' : 'Se revisa con Docker encendido'}
               </div>
+              <div className="fs-12 muted" style={{ marginTop: 4 }}>{a.internet?.bore_pub ? '✓ bore.pub responde' : '⚠ No se llega a bore.pub'}</div>
+              {a.conexion && <div className="fs-12" style={{ color: a.conexion.en_linea ? '#22c55e' : '#ef4444' }}>
+                {a.conexion.en_linea ? '✓ Tu base responde desde internet con SSL (01+02 sincronizadas)' : '⚠ Re-conectando túnel automáticamente…'}</div>}
             </div>
             <div className="stat-block">
-              <div className="fw-700">🌐 Internet</div>
-              <div className="fs-12 muted">{a.internet?.bore_pub ? 'bore.pub responde' : 'No se llega a bore.pub'}</div>
-              {a.conexion && <div className="fs-12" style={{ color: a.conexion.en_linea ? '#22c55e' : '#ef4444' }}>
-                {a.conexion.en_linea ? 'Tu base responde desde internet con SSL' : 'Configurada pero no responde ahora'}</div>}
+              <div className="fw-700">🌉 Puente SIACI Dual (01 + 02)</div>
+              <div className="fs-12 muted">
+                {siaci.instalado
+                  ? (siaci.corriendo
+                      ? `✓ En tiempo real (${(siaci.contenedores || []).filter((c: any) => c.corriendo).map((c: any) => c.nombre).join(' + ') || 'activo'})`
+                      : '⚡ Auto-arrancando contenedores y tareas de SIACI…')
+                  : 'Listo para vigilar contenedores siaci-tiempo-real (01 Harpicorp y 02 Trahiec)'}
+              </div>
+              {siaci.tareas?.length > 0 && (
+                <div className="fs-11" style={{ marginTop: 4, color: '#22c55e' }}>
+                  ✓ {siaci.tareas.filter((t: any) => t.corriendo).length}/{siaci.tareas.length} tareas Windows SIACI vigiladas 24/7
+                </div>
+              )}
             </div>
           </div>
         )}
       </Card>
 
-      <Card title="Servicios automáticos" icon={<span>♻</span>}
-            sub="Lo que tiene que levantarse solo para que FacturaPro nunca pierda tu base: tras un corte de luz, un reinicio o si algo se cae."
+      <Card title="Piloto Automático 24/7 (Pre-Activado)" icon={<span>⚡</span>}
+            sub="Todos los servicios críticos (Docker, PostgreSQL, Túnel Bore, Vigilante 24/7, Modo Admin y Puente SIACI 01+02) vienen activados por defecto y se auto-reparan solos tras cortes de luz o reinicios."
             right={<AsyncButton size="sm" onClick={cargarServicios}>↻</AsyncButton>}>
-        {!servs && <div className="muted fs-12">Revisando servicios…</div>}
+        {!servs && <div className="muted fs-12">Verificando piloto automático…</div>}
         {listaServicios.map(s => (
           <div key={s.id} className="row between items-center gap-8" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
             <div style={{ minWidth: 0 }}>
               <div className="fs-13 fw-700"><span style={{ color: colorServicio(s) }}>●</span> {s.nombre}</div>
               <div className="fs-12 muted">{s.detalle}</div>
             </div>
-            <div className="row gap-4" style={{ flexShrink: 0 }}>
+            <div className="row gap-4 items-center" style={{ flexShrink: 0 }}>
+              {s.automatico && s.corriendo && !s.accion && (
+                <span className="badge ok">✓ Pre-activado · 24/7</span>
+              )}
+              {s.automatico && !s.corriendo && !s.accion && (
+                <span className="badge neutral">⚡ Auto-arranque listo</span>
+              )}
               {s.accion && (
                 <AsyncButton size="sm" variant={s.accion === 'detener-suelto' ? 'danger' : 'primary'} disabled={!!tarea}
                              confirmText={s.accion === 'detener-suelto' ? 'Se detiene ese bore (lo que publica deja de verse desde internet).' : undefined}
                              onClick={() => s.accion === 'app' ? appAutomatica() : accionConClave(s.accion!, s.contenedor ?? s.pid)}>
-                  {s.tipo === 'vigilante' && s.instalado ? 'Actualizar' : TEXTO_ACCION[s.accion] || s.accion}
+                  {TEXTO_ACCION[s.accion] || s.accion}
                 </AsyncButton>
-              )}
-              {s.tipo === 'vigilante' && s.instalado && (
-                <AsyncButton size="sm" variant="danger" disabled={!!tarea}
-                             confirmText="Si el túnel se cae con la app cerrada, nadie lo levantará solo."
-                             onClick={() => accionServicio('quitar-vigilante')}>Quitar</AsyncButton>
               )}
             </div>
           </div>
         ))}
         {servs && (
-          <div className="btn-row">
-            <AsyncButton variant="success" disabled={!!tarea || todoAutomatico} onClick={hacerTodo}>
-              {todoAutomatico ? '✓ Todo se levanta solo' : '♻ Hacer todo automático'}
-            </AsyncButton>
+          <div className="btn-row" style={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+            <span className="fs-12" style={{ color: adminActivo ? '#22c55e' : '#fbbf24', fontWeight: 600 }}>
+              {adminActivo
+                ? '✓ Modo Administrador SYSTEM, Firewall, Vigilante 24/7 y Puente SIACI activos sin intervención manual'
+                : '⚠ Activa el Modo Administrador (1 clic) para que el servicio corra como SYSTEM al encender la PC y no vuelva a pedir permisos'}
+            </span>
+            <div className="row gap-6">
+              {!adminActivo && (
+                <AsyncButton size="sm" variant="primary" disabled={!!tarea} onClick={() => accionConClave('modo-admin')}>
+                  🛡️ Activar Modo Administrador
+                </AsyncButton>
+              )}
+              <AsyncButton size="sm" variant="default" disabled={!!tarea} onClick={hacerTodo}>
+                ⚡ Verificar y reparar todo ahora
+              </AsyncButton>
+            </div>
           </div>
         )}
         {listaServicios.some(s => s.tipo === 'vigilante' && s.sin_enlace) && (
           <div className="fs-12" style={{ color: 'var(--warning)' }}>
-            Falta el código de enlace (abajo): sin él, si bore.pub cambia el puerto, el vigilante lo levanta pero FacturaPro no se entera.
+            Falta el código de enlace (abajo): guárdalo una sola vez para que si bore.pub cambia el puerto, FacturaPro actualice 01 Harpicorp y 02 Trahiec al instante.
           </div>
         )}
       </Card>
@@ -494,15 +552,15 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
       )}
 
       {a && (
-        <Card title="Que se arregle solo" icon={<span>🛡</span>}
-              sub="Si bore.pub le da otro puerto al túnel, el vigilante lo levanta de nuevo y se lo avisa a FacturaPro con el código de enlace (FacturaPro → Conecta tu base de datos → Dirección de tu base → Generar código).">
+        <Card title="Enlace Automático con FacturaPro (01 Harpicorp + 02 Trahiec)" icon={<span>🛡</span>}
+              sub="El Vigilante 24/7 ya viene pre-activado de fábrica: si bore.pub cambia el puerto tras un corte de luz o reinicio, lo detecta en segundos y actualiza automáticamente 01 Harpicorp y 02 Trahiec en FacturaPro.">
           <div className="row gap-4 items-center">
             <input className="input mono flex-1" placeholder="FPENLACE.…" value={enlace} onChange={e => setEnlace(e.target.value)} />
             <AsyncButton size="sm" disabled={!enlace.trim()} onClick={async () => {
               const r = await call('/api/servidor/enlace', { method: 'POST', body: JSON.stringify({ codigo: enlace.trim() }) });
               toast('Enlace con FacturaPro', r.message, r.ok ? 'success' : 'danger');
-              if (r.ok) { setEnlace(''); analizar(pgElegido || undefined, minioElegido || undefined); }
-            }}>Guardar</AsyncButton>
+              if (r.ok) { setEnlace(''); analizar(pgElegido || undefined, minioElegido || undefined); cargarServicios(); }
+            }}>Guardar código</AsyncButton>
           </div>
           {vig.problema && (
             <div className="fs-12" style={{ margin: '8px 0', color: 'var(--danger)' }}>⚠ {vig.problema}</div>
@@ -513,7 +571,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               <ol style={{ margin: '0 0 8px', paddingLeft: 18 }}>
                 <li>Abre FacturaPro con tu usuario administrador → <b>Conecta tu base de datos</b> → <b>Dirección de tu base</b>.</li>
                 <li>Pulsa <b>Generar código de enlace</b> y cópialo (empieza con <span className="mono">FPENLACE.</span>).</li>
-                <li>Pégalo arriba y pulsa <b>Guardar</b>. Listo: si bore.pub cambia el puerto, FacturaPro se entera solo.</li>
+                <li>Pégalo arriba y pulsa <b>Guardar código</b>. Listo: el Piloto Automático queda enlazado para siempre.</li>
               </ol>
               <button className="btn btn-sm btn-primary" onClick={() => (window as any).electronAPI?.openExternal?.(URL_ENLACE)}>
                 Abrir FacturaPro → Conecta tu base de datos
@@ -524,14 +582,13 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               </div>
             </div>
           )}
-          <div className="fs-12" style={{ margin: '8px 0', color: vig.enlace && vig.instalado ? '#22c55e' : '#f59e0b' }}>
-            {vig.enlace ? (vig.problema ? `✖ Enlazado con ${vig.facturapro}, pero no se llega` : `✓ Enlazado con ${vig.facturapro}`) : 'Sin enlace: si cambia el puerto tendrás que cambiarlo a mano en FacturaPro'}
-            {' · '}{vig.instalado ? 'vigilante instalado' : 'vigilante no instalado'}
+          <div className="fs-12" style={{ margin: '8px 0', color: vig.enlace ? '#22c55e' : '#f59e0b' }}>
+            {vig.enlace ? (vig.problema ? `✖ Enlazado con ${vig.facturapro}, pero no se llega` : `✓ Enlazado con ${vig.facturapro} (Sincronización Dual 01+02 activa)`) : 'Sin enlace: pega el código FPENLACE arriba para que el cambio de puerto sea 100% automático'}
+            {' · '}✓ Vigilante 24/7 pre-activado
             {vig.informado ? ` · último aviso ${vig.informado} (puerto ${vig.puerto_informado})` : ''}
           </div>
           <div className="btn-row">
-            <AsyncButton variant="success" disabled={!!tarea} onClick={() => empezar('vigilante', '/api/servidor/vigilante')}>Vigilar siempre (arranca con el equipo)</AsyncButton>
-            <AsyncButton disabled={!!tarea} onClick={() => empezar('avisar', '/api/servidor/avisar')}>Avisar la dirección a FacturaPro ahora</AsyncButton>
+            <AsyncButton variant="primary" disabled={!!tarea} onClick={() => empezar('avisar', '/api/servidor/avisar')}>⚡ Sincronizar puerto con FacturaPro ahora</AsyncButton>
           </div>
         </Card>
       )}

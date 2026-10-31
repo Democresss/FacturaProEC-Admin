@@ -227,12 +227,22 @@ def servicio_accion(a: Accion) -> Dict[str, Any]:
 
 
 def arrancar_vigilante_de_la_app() -> None:
-    """Mientras la app está abierta (también en la bandeja) vigila el túnel. Si el servicio del sistema ya lo
-    vigila, la app espera y toma el relevo solo si ese servicio se detiene: nunca hay dos a la vez."""
+    """Mientras la app está abierta (también en la bandeja) activa el Piloto Automático 24/7 y vigila el túnel
+    y el puente SIACI. Si el servicio del sistema ya lo vigila, la app toma el relevo solo si ese servicio se detiene."""
     try:
         fs.encender_vigilante_aqui()
     except Exception:  # noqa: BLE001 - la app funciona igual sin vigilante
         pass
+
+
+@router.post("/piloto-automatico")
+def piloto_automatico() -> Dict[str, Any]:
+    """Activa en silencio todos los servicios automáticos (Docker, Vigilante, Modo Admin, Puente SIACI 01+02)."""
+    try:
+        fs.asegurar_piloto_automatico_silencioso()
+        return {"ok": True, "data": fs.servicios(), "message": "Piloto Automático 24/7 activado."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
 
 
 @router.post("/avisar")

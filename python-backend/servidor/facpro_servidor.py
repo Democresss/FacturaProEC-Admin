@@ -186,7 +186,9 @@ def sonda_ssl(host, puerto, timeout=8.0):
 
 
 def usuario_real():
-    """El usuario que abrió la herramienta (aunque se ejecute con sudo o con la ventana de clave del sistema)."""
+    """El usuario que abrió la herramienta (aunque se ejecute con sudo o con la ventana de permiso UAC en Windows)."""
+    if os.environ.get("FACPRO_USUARIO_REAL"):
+        return os.environ["FACPRO_USUARIO_REAL"]
     if os.environ.get("SUDO_USER"):
         return os.environ["SUDO_USER"]
     if os.environ.get("PKEXEC_UID") and not ES_WINDOWS:
@@ -195,6 +197,10 @@ def usuario_real():
             return pwd.getpwuid(int(os.environ["PKEXEC_UID"])).pw_name
         except Exception:
             return ""
+    if ES_WINDOWS:
+        u = os.environ.get("USERNAME") or ""
+        if u and u.lower() not in ("system", "local service", "network service", "servicio local", "servicio de red"):
+            return u
     return ""
 
 
@@ -460,8 +466,23 @@ def elegir_docker():
             guardar_config(config)
 
 
+def _asegurar_entorno_docker_windows():
+    """En Windows, si el proceso corre como SYSTEM o tarea elevada, asegura que DOCKER_CONFIG apunte
+    al perfil real del dueño de carpeta_datos() para que docker.exe encuentre el contexto desktop-linux."""
+    if not ES_WINDOWS:
+        return
+    try:
+        casa_datos = os.path.dirname(os.path.abspath(carpeta_datos()))
+        cfg_dir = os.path.join(casa_datos, ".docker")
+        if os.path.isdir(cfg_dir) and not os.environ.get("DOCKER_CONFIG"):
+            os.environ["DOCKER_CONFIG"] = cfg_dir
+    except Exception:
+        pass
+
+
 def docker_bin():
     global DOCKER
+    _asegurar_entorno_docker_windows()
     if shutil.which(DOCKER):
         elegir_docker()
         return DOCKER
@@ -523,6 +544,17 @@ def docker_estado():
     versiones = [l.strip() for l in (out or "").splitlines() if re.match(r"^\d+\.\d+", l.strip())]
     version = versiones[0] if versiones else ""
     corriendo = code == 0 and bool(version)
+
+    if not corriendo and ES_WINDOWS:
+        for pipe_win in ("npipe:////./pipe/dockerDesktopLinuxEngine", "npipe:////./pipe/docker_engine"):
+            if os.environ.get("DOCKER_HOST") == pipe_win:
+                continue
+            code_w, out_w = dk("info", "--format", "{{.ServerVersion}}", timeout=15, host=pipe_win)
+            vers_w = [l.strip() for l in (out_w or "").splitlines() if re.match(r"^\d+\.\d+", l.strip())]
+            if code_w == 0 and vers_w:
+                os.environ["DOCKER_HOST"] = pipe_win
+                return {"instalado": True, "corriendo": True, "version": vers_w[0],
+                        "sin_permiso": False, "motor": "Docker Desktop", "ocupado": False}
 
     if not corriendo and not ES_WINDOWS:
         # Si el motor actual no responde o no tiene permiso, buscar si otro candidato del equipo sí responde
@@ -819,8 +851,8 @@ def _avisar_docker_caido(ahora=None):
 
 def iniciar_docker(manual=False):
     """Enciende Docker si está instalado pero apagado. manual=True SOLO con el botón «Encender Docker»: es lo único
-    que puede reiniciar un Docker Desktop colgado («Configurar todo» y el vigilante nunca lo reinician). El vigilante llama sin manual: si Docker solo tarda en
-    responder no se toca nada (antes, en la 2.3.21, lo reiniciaba cada minuto y paraba todos los contenedores)."""
+    que puede reiniciar un Docker Desktop colgado («Configurar todo» y el vigilante nunca lo reinician, pero SÍ lo
+    encienden cuando está completamente apagado al arrancar la PC)."""
     estado = docker_estado()
     if estado["corriendo"]:
         _DD_CAIDO["desde"] = None
@@ -828,26 +860,21 @@ def iniciar_docker(manual=False):
     if estado.get("ocupado") and not manual:
         log("Docker tarda en responder (ocupado): se espera, no se toca.", "aviso")
         return False
-    log("Docker está apagado: encendiéndolo…", "paso")
+    log("Docker está apagado: encendiéndolo automáticamente…", "paso")
     if ES_WINDOWS:
+        # Intentar primero iniciar el servicio de Windows (directo o mediante el ayudante SYSTEM) y abrir Docker Desktop
+        code_sc, _ = run(["sc", "start", "com.docker.service"], timeout=15)
+        if code_sc != 0 and not _es_admin_windows() and ayudante_disponible():
+            ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=45)
         abrir_docker_desktop()
     elif _MOTOR["nombre"] == "Docker Desktop":
-        # Nunca se reinicia solo (lo pidió el usuario: la app no debe cerrar Docker). Caído: se avisa.
         if not abrir_docker_desktop(reiniciar_colgado=manual) and not manual:
             _avisar_docker_caido()
             return False
     elif hasattr(os, "geteuid") and os.geteuid() != 0 and ayudante_disponible():
-        if manual:
-            ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
-        else:
-            log("Docker del sistema está apagado. Para encenderlo usa «Encender Docker».", "aviso")
-            return False
+        ayudante({"orden": "bandera", "bandera": "--iniciar-docker"}, timeout=180)
     else:
-        if manual:
-            run(["systemctl", "start", "docker"], timeout=60)
-        else:
-            log("Docker del sistema está apagado. Para encenderlo usa «Encender Docker».", "aviso")
-            return False
+        run(["systemctl", "start", "docker"], timeout=60)
     for _ in range(90 if _MOTOR["nombre"] == "Docker Desktop" or ES_WINDOWS else 45):  # Docker Desktop tarda más
         time.sleep(2)
         if docker_estado()["corriendo"]:
@@ -1172,7 +1199,7 @@ def analizar(pg_elegido=None, minio_elegido=None):
         "version": VERSION,
         "sistema": {"so": "%s %s" % (platform.system(), platform.release()), "equipo": socket.gethostname(),
                     "python": platform.python_version(), "carpeta": carpeta_datos(),
-                    "admin": (not ES_WINDOWS and hasattr(os, "geteuid") and os.geteuid() == 0)},
+                    "admin": (_es_admin_windows() if ES_WINDOWS else (hasattr(os, "geteuid") and os.geteuid() == 0))},
         "docker": dict(docker_estado(), motores=motores_docker()) if not ES_WINDOWS else docker_estado(),
         "internet": {"bore_pub": puerto_abierto(BORE_HOST, BORE_PUERTO_CONTROL, 5)},
         "config": sin_secretos(config),
@@ -1197,6 +1224,8 @@ def analizar(pg_elegido=None, minio_elegido=None):
                               "problema": problema_enlace(config.get("enlace_url")) if config.get("enlace_url") else "",
                               "informado": config.get("informado") or "", "puerto_informado": config.get("puerto_informado"),
                               "instalado": vigilante_instalado(), "corriendo": bool(vigilante_vivo())}
+    resultado["modo_admin"] = modo_admin_estado()
+    resultado["siaci"] = estado_puente_siaci(resultado.get("todos") or [])
     return resultado
 
 
@@ -1865,6 +1894,11 @@ def _configurar(opciones):
                                "bucket": minio["bucket"], "ca_pem": minio["ca_pem"]}, nuevo)
     else:
         log("Sin código de enlace: copia la dirección de abajo en FacturaPro (o guarda el código y vuelve a «Configurar todo»).", "aviso")
+    # Activar siempre el piloto automático completo al terminar de configurar
+    try:
+        asegurar_piloto_automatico_silencioso()
+    except Exception:
+        pass
     minio_pantalla = {k: v for k, v in (minio or {}).items() if k not in ("clave", "root_clave", "ca_pem")} or None
     return {"url": url, "ssl": en_linea is True, "puerto": puerto_pg, "base": base, "usuario": usuario, "minio": minio_pantalla,
             "facturapro": URL_FACTURAPRO, "enviada": bool(enviada), "minio_error": minio_error}
@@ -1956,6 +1990,10 @@ def guardar_enlace(codigo):
             r = dict(r, siguiente="La app manda sola la conexión completa a FacturaPro (no pulsas nada): mira el registro.")
         else:
             r = dict(r, siguiente="Ahora pulsa «Configurar todo»: la app manda la conexión completa a FacturaPro (no pegas nada).")
+    try:
+        asegurar_piloto_automatico_silencioso()
+    except Exception:
+        pass
     return r
 
 
@@ -2101,19 +2139,160 @@ def _destino_tunel(nombre):
     return destino_host, destino_puerto, extra or None
 
 
+def _es_siaci(c):
+    nom = (c.get("nombre") or "").lower()
+    return nom.startswith("siaci-tiempo-real") or nom.startswith("facpro-siaci") or "siaci" in nom
+
+
+TAREAS_SIACI_WINDOWS = (
+    "FacPro SIACI Lector",
+    "FacPro SIACI Espejo",
+    "FacPro SIACI Escritura",
+    "FacPro SIACI Lector 02",
+    "FacPro SIACI Espejo 02",
+    "FacPro SIACI Escritura 02",
+)
+
+
+def estado_puente_siaci(lista_contenedores=None):
+    """Detecta el estado del Puente SIACI (contenedores tiempo real 01/02 y tareas programadas de Windows)."""
+    if lista_contenedores is None:
+        lista_contenedores = contenedores_todos() if docker_estado().get("corriendo") else []
+    conts = []
+    for c in lista_contenedores:
+        if _es_siaci(c):
+            corriendo = c.get("corriendo") if "corriendo" in c else (c.get("estado") == "running")
+            conts.append({"nombre": c["nombre"], "corriendo": bool(corriendo), "estado": c.get("estado", "")})
+    tareas = []
+    if ES_WINDOWS:
+        for tn in TAREAS_SIACI_WINDOWS:
+            code, out = run(["schtasks", "/Query", "/TN", tn, "/FO", "CSV", "/NH"], timeout=6)
+            if code == 0 and out.strip():
+                linea = out.strip().splitlines()[-1]
+                corriendo_t = any(w in linea.lower() for w in ("running", "ejecut", "ready", "listo"))
+                tareas.append({"nombre": tn, "activa": corriendo_t, "detalle": linea})
+    instalado = bool(conts or tareas or (ES_WINDOWS and os.path.exists(r"C:\FacProSIACI\puente.ps1")))
+    corriendo_todo = (all(x["corriendo"] for x in conts) if conts else True) and (all(t["activa"] for t in tareas) if tareas else True)
+    return {
+        "instalado": instalado,
+        "corriendo": instalado and corriendo_todo,
+        "contenedores": conts,
+        "tareas": tareas,
+        "empresas": "01 Harpicorp + 02 Trahiec" if len(conts) >= 2 or any("02" in t["nombre"] for t in tareas) else ("01 Harpicorp" if instalado else ""),
+    }
+
+
+def asegurar_puente_siaci():
+    """Supervisa y auto-repara silenciosamente los contenedores y tareas del Puente SIACI (01 Harpicorp y 02 Trahiec)."""
+    reparados = 0
+    if docker_estado().get("corriendo"):
+        for c in contenedores_todos():
+            if _es_siaci(c):
+                with en_motor(c.get("host")):
+                    info = inspeccionar(c["nombre"])
+                    if _politica(info) != "always":
+                        dk("update", "--restart", "always", c["nombre"])
+                    if c.get("estado") != "running":
+                        log("Puente SIACI («%s») estaba detenido: encendiéndolo automáticamente…" % c["nombre"], "paso")
+                        dk("start", c["nombre"])
+                        reparados += 1
+    if ES_WINDOWS:
+        for tn in ("FacPro SIACI Espejo", "FacPro SIACI Escritura", "FacPro SIACI Espejo 02", "FacPro SIACI Escritura 02"):
+            code, out = run(["schtasks", "/Query", "/TN", tn, "/FO", "CSV", "/NH"], timeout=6)
+            if code == 0 and out.strip():
+                bajo = out.lower()
+                if "running" not in bajo and "ejecut" not in bajo:
+                    run(["schtasks", "/Run", "/TN", tn], timeout=10)
+                    reparados += 1
+    return {"ok": True, "reparados": reparados}
+
+
+def asegurar_piloto_automatico_silencioso():
+    """Activa automáticamente (sin botones manuales) el auto-arranque de Docker, el vigilante, el modo admin
+    y la política --restart always en todos los contenedores clave y en el Puente SIACI."""
+    try:
+        est = docker_estado()
+        if est.get("instalado") and not est.get("corriendo") and not est.get("sin_permiso"):
+            iniciar_docker(manual=False)
+            est = docker_estado()
+        if est.get("instalado") and docker_al_arrancar().get("activo") is False:
+            try:
+                activar_docker_al_arrancar()
+            except FaltaAdmin:
+                if ayudante_disponible():
+                    ayudante({"orden": "bandera", "bandera": "--docker-al-arrancar"}, timeout=60)
+            except Exception:
+                pass
+        vig = vigilante_info()
+        if not vig.get("instalado") or vig.get("viejo"):
+            try:
+                instalar_vigilante()
+            except FaltaAdmin:
+                if ayudante_disponible():
+                    ayudante({"orden": "bandera", "bandera": "--instalar-vigilante"}, timeout=60)
+            except Exception:
+                pass
+        adm = modo_admin_estado()
+        if not adm.get("activo"):
+            if ES_WINDOWS and (_es_admin_windows() or ayudante_disponible()):
+                try:
+                    if _es_admin_windows():
+                        activar_modo_admin()
+                    else:
+                        ayudante({"orden": "bandera", "bandera": "--modo-admin"}, timeout=90)
+                except Exception:
+                    pass
+            elif not ES_WINDOWS and (os.geteuid() == 0 or ayudante_disponible()):
+                try:
+                    if os.geteuid() == 0:
+                        activar_modo_admin()
+                    else:
+                        ayudante({"orden": "bandera", "bandera": "--modo-admin"}, timeout=60)
+                except Exception:
+                    pass
+        if est.get("corriendo"):
+            config = leer_config()
+            for c in contenedores_todos():
+                es_pg = bool(config.get("pg_contenedor")) and c["nombre"] == config.get("pg_contenedor")
+                es_mi = bool(config.get("minio_contenedor")) and c["nombre"] == config.get("minio_contenedor")
+                es_bo = "bore" in c.get("imagen", "") or c["nombre"] in (C_BORE_PG, C_BORE_MINIO, C_MINIO_TLS)
+                if es_pg or es_mi or es_bo or _es_siaci(c):
+                    try:
+                        with en_motor(c.get("host")):
+                            info = inspeccionar(c["nombre"])
+                            pol = _politica(info)
+                            if pol not in ("always", "unless-stopped") or c.get("estado") != "running":
+                                _hacer_automatico(c["nombre"])
+                    except Exception:
+                        pass
+        asegurar_puente_siaci()
+    except Exception:
+        pass
+
+
 def reparar_tunel(config=None):
-    """Vuelve a levantar el túnel de PostgreSQL. Devuelve el puerto con el que quedó (o None)."""
+    """Vuelve a levantar el túnel de PostgreSQL (y enciende Docker / contenedores si estaban apagados).
+    Devuelve el puerto con el que quedó (o None)."""
     config = config if config is not None else leer_config()
     anterior = config.get("bore_puerto_pg")
-    # El vigilante NUNCA enciende, reinicia ni cierra Docker (antes llamaba a iniciar_docker y en Linux con Docker
-    # Engine terminaba en «systemctl start docker»): si Docker no está, solo avisa y reintenta en la próxima vuelta.
     if not docker_estado().get("corriendo"):
-        evento("Docker no está corriendo: el túnel se levanta cuando vuelva (FacPro no toca Docker).", "error")
-        return None
+        log("Docker no estaba corriendo al revisar el túnel: encendiéndolo automáticamente…", "paso")
+        if not iniciar_docker(manual=False):
+            evento("Docker no está corriendo y aún no termina de arrancar: se reintentará automáticamente.", "error")
+            return None
+    asegurar_red()
     pg = config.get("pg_contenedor")
     if pg and any(c["nombre"] == pg and c["estado"] != "running" for c in contenedores()):
         log("PostgreSQL («%s») estaba apagado: encendiéndolo…" % pg, "paso")
         dk("start", pg)
+        time.sleep(2)
+    mi = config.get("minio_contenedor")
+    if mi and any(c["nombre"] == mi and c["estado"] != "running" for c in contenedores()):
+        dk("start", mi)
+    for c_aux in (C_MINIO_TLS, C_BORE_MINIO):
+        if any(c["nombre"] == c_aux and c["estado"] != "running" for c in contenedores()):
+            dk("start", c_aux)
+    asegurar_puente_siaci()
     if any(c["nombre"] == C_BORE_PG for c in contenedores()):
         destino_host, destino_puerto, extra = _destino_tunel(C_BORE_PG)
     else:
@@ -2133,17 +2312,47 @@ def reparar_tunel(config=None):
     return puerto
 
 
-def vuelta_vigilante(estado, fallos_para_reparar=3):
-    """Una revisión. estado = {"fallos": n}. Devuelve lo que pasó (para el registro y las pruebas)."""
+def vuelta_vigilante(estado, fallos_para_reparar=1):
+    """Una revisión rápida y auto-curativa. estado = {"fallos": n}. Devuelve lo que pasó."""
+    try:
+        asegurar_puente_siaci()
+    except Exception:
+        pass
     config = leer_config()
     puerto = config.get("bore_puerto_pg")
     if not puerto:
-        return "sin_tunel"
-    if sonda_ssl(BORE_HOST, puerto, 8) is not None:
+        # Si hay un contenedor bore-postgres corriendo aunque config no tenga puerto, adoptarlo
+        if docker_estado().get("corriendo") and any(c["nombre"] == C_BORE_PG and c["estado"] == "running" for c in contenedores()):
+            asignado, _ = _puerto_bore_de_logs(C_BORE_PG)
+            if asignado:
+                config.update(bore_puerto_pg=asignado, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+                guardar_config(config)
+                puerto = asignado
+        if not puerto:
+            return "sin_tunel"
+    # Verificar también si el contenedor bore-postgres cambió de puerto por su cuenta al reiniciar
+    if docker_estado().get("corriendo") and any(c["nombre"] == C_BORE_PG and c["estado"] == "running" for c in contenedores()):
+        asignado_actual, _ = _puerto_bore_de_logs(C_BORE_PG)
+        if asignado_actual and asignado_actual != puerto and sonda_ssl(BORE_HOST, asignado_actual, 6) is not None:
+            evento("El contenedor del túnel adoptó un puerto nuevo en bore.pub: %s → %s" % (puerto, asignado_actual), "aviso")
+            config.update(bore_puerto_pg=asignado_actual, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+            guardar_config(config)
+            puerto = asignado_actual
+    if sonda_ssl(BORE_HOST, puerto, 6) is not None:
         estado["fallos"] = 0
-        if config.get("enlace_facturapro") and config.get("puerto_informado") != puerto:
+        if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
+            estado["sincronizado_inicio"] = True
             informar_direccion(puerto, config)
         return "ok"
+    # Doble comprobación rápida (2 s) cuando fallos_para_reparar == 1 para no esperar minutos tras un reinicio
+    if fallos_para_reparar <= 1:
+        time.sleep(2)
+        if sonda_ssl(BORE_HOST, puerto, 6) is not None:
+            estado["fallos"] = 0
+            if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
+                estado["sincronizado_inicio"] = True
+                informar_direccion(puerto, config)
+            return "ok"
     estado["fallos"] = estado.get("fallos", 0) + 1
     log("El túnel %s:%s no responde desde internet (%d/%d)" % (BORE_HOST, puerto, estado["fallos"], fallos_para_reparar), "aviso")
     if estado["fallos"] < fallos_para_reparar:
@@ -2158,31 +2367,38 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
         if sonda_ssl(BORE_HOST, nuevo, 8) is not None:
             break
         time.sleep(2)
-    if nuevo != puerto or leer_config().get("puerto_informado") != nuevo:
-        informar_direccion(nuevo)
+    estado["sincronizado_inicio"] = True
+    informar_direccion(nuevo)
     if nuevo == puerto:
         evento("El túnel volvió a estar en línea (%s:%s, misma dirección)." % (BORE_HOST, nuevo), "ok")
     return "reparado" if nuevo == puerto else "puerto_nuevo"
 
 
-def vigilar(intervalo=60, vueltas=None, modo="servicio"):
+def vigilar(intervalo=20, vueltas=None, modo="servicio"):
     """Revisa el túnel cada `intervalo` segundos (para siempre, o `vueltas` veces).
     Si ya hay otro vigilante vivo (el servicio o la app abierta), no hace nada y devuelve False."""
     otro = vigilante_vivo()
     if otro and int(otro["pid"]) != os.getpid():
-        return False
-    _latido(pid=os.getpid(), version=VERSION, modo=modo, desde=time.strftime("%Y-%m-%d %H:%M"), resultado="iniciando")
+        # Si nosotros somos SYSTEM/Admin en Windows y el otro vigilante no tenía permisos Admin, tomamos el relevo
+        if not (ES_WINDOWS and _es_admin_windows() and not otro.get("admin")):
+            return False
+    es_adm = bool(_es_admin_windows()) if ES_WINDOWS else (hasattr(os, "geteuid") and os.geteuid() == 0)
+    _latido(pid=os.getpid(), version=VERSION, modo=modo, admin=es_adm, desde=time.strftime("%Y-%m-%d %H:%M"), resultado="iniciando")
     if leer_latido().get("pid") not in (None, os.getpid()):   # otro arrancó en el mismo instante
         return False
-    log("Vigilante del túnel encendido (cada %d s)." % intervalo, "ok")
+    if ES_WINDOWS and es_adm:
+        _iniciar_hilo_ayudante_windows()
+    log("Piloto automático y vigilante encendidos (revisión cada %d s%s)." % (intervalo, " · SYSTEM Admin" if es_adm else ""), "ok")
+    if vueltas is None:
+        asegurar_piloto_automatico_silencioso()
     estado, n = {"fallos": 0}, 0
     while vueltas is None or n < vueltas:
         try:
             r = vuelta_vigilante(estado)
-            _latido(resultado=r, puerto=leer_config().get("bore_puerto_pg"))
+            _latido(resultado=r, admin=es_adm, puerto=leer_config().get("bore_puerto_pg"))
         except Exception as e:  # noqa: BLE001 - el vigilante no se detiene por un error
             log("Vigilante: %s" % e, "error")
-            _latido(resultado="error: %s" % str(e)[:120])
+            _latido(resultado="error: %s" % str(e)[:120], admin=es_adm)
         n += 1
         if vueltas is None or n < vueltas:
             time.sleep(intervalo)
@@ -2213,17 +2429,27 @@ def _ejecutable_estable():
         return destino if os.path.exists(destino) else origen
 
 
-def _comando_base():
+def _comando_base(sin_ventana=True):
     if getattr(sys, "frozen", False):
         return [_ejecutable_estable()]
     python = sys.executable
-    if ES_WINDOWS and os.path.exists(os.path.join(os.path.dirname(python), "pythonw.exe")):
-        python = os.path.join(os.path.dirname(python), "pythonw.exe")   # sin ventana negra
+    if ES_WINDOWS:
+        if sin_ventana and os.path.exists(os.path.join(os.path.dirname(python), "pythonw.exe")):
+            python = os.path.join(os.path.dirname(python), "pythonw.exe")   # sin ventana negra para --vigilar
+        elif not sin_ventana and python.lower().endswith("pythonw.exe"):
+            py_con = os.path.join(os.path.dirname(python), "python.exe")
+            if os.path.exists(py_con):
+                python = py_con
     return [python, os.path.abspath(__file__)]
 
 
+def _comando_cli():
+    """Comando con python.exe (con salida estándar) para ejecutar acciones como --modo-admin o --instalar-vigilante."""
+    return _comando_base(sin_ventana=False) + ["--datos", carpeta_datos()]
+
+
 def _comando_vigilante():
-    return _comando_base() + ["--datos", carpeta_datos(), "--vigilar"]
+    return _comando_base(sin_ventana=True) + ["--datos", carpeta_datos(), "--vigilar"]
 
 
 UNIDAD = "facpro-vigilante"
@@ -2329,20 +2555,57 @@ def _vigilante_en_registro_hkcu():
     except Exception:
         return False
 
+def _desbloquear_tarea_windows(nombre_tarea):
+    """Permite que procesos sin elevar (usuario estándar) puedan consultar y arrancar una tarea SYSTEM en Windows."""
+    if not ES_WINDOWS or not _es_admin_windows():
+        return
+    sysroot = os.environ.get("SystemRoot") or r"C:\Windows"
+    ruta_tarea = os.path.join(sysroot, "System32", "Tasks", nombre_tarea)
+    if os.path.exists(ruta_tarea) or "*" in nombre_tarea:
+        run(["icacls", ruta_tarea, "/grant", "*S-1-5-11:(RX)", "*S-1-5-32-545:(RX)"], timeout=15)
+
+
+def _leer_modo_admin_win():
+    try:
+        with open(os.path.join(carpeta_datos(), "modo-admin-win.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _guardar_modo_admin_win(datos):
+    try:
+        os.makedirs(carpeta_datos(), exist_ok=True)
+        ruta = os.path.join(carpeta_datos(), "modo-admin-win.json")
+        with open(ruta, "w", encoding="utf-8") as f:
+            json.dump(datos, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
 def vigilante_info():
     """¿Está instalado el arranque automático del vigilante? cómo, y si hay que actualizarlo."""
-    texto, info = "", {"instalado": False, "como": "", "viejo": False}
+    texto, info = "", {"instalado": False, "como": "", "viejo": False, "es_sistema": False}
     if ES_WINDOWS:
         code, out = run(["schtasks", "/Query", "/TN", TAREA_WINDOWS, "/XML"], timeout=20)
         if code == 0:
             texto = out
-            info.update(instalado=True, como="tarea de Windows (%s)" % ("al encender el equipo" if "S-1-5-18" in out else "al iniciar sesión"),
+            es_sys = "S-1-5-18" in out or "HighestAvailable" in out or "<BootTrigger>" in out
+            info.update(instalado=True, es_sistema=es_sys,
+                        como="tarea de Windows (%s)" % ("al encender el equipo · SYSTEM" if es_sys else "al iniciar sesión"),
                         viejo="PT0S" not in out)   # la de la 1.4 se detenía a las 72 h y no se reiniciaba
+        elif "acceso denegado" in (out or "").lower() or "access is denied" in (out or "").lower():
+            # Existe en C:\Windows\System32\Tasks como tarea SYSTEM pero aún no tenía icacls RX para usuario estándar
+            info.update(instalado=True, es_sistema=True,
+                        como="tarea de Windows (al encender el equipo · SYSTEM)", viejo=False)
+        elif _leer_modo_admin_win().get("tarea_sistema") or (vigilante_vivo() or {}).get("admin"):
+            info.update(instalado=True, es_sistema=True,
+                        como="tarea de Windows (al encender el equipo · SYSTEM)", viejo=False)
         elif _vigilante_en_registro_hkcu():
-            info.update(instalado=True, como="inicio de usuario (HKCU Run)", viejo=False)
+            info.update(instalado=True, es_sistema=False, como="inicio de usuario (HKCU Run)", viejo=False)
     elif os.path.exists(SERVICIO_LINUX):
         texto = io_leer(SERVICIO_LINUX)
-        info.update(instalado=True, como="servicio del sistema (%s)" % UNIDAD, viejo="--datos" not in texto)
+        info.update(instalado=True, es_sistema=True, como="servicio del sistema (%s)" % UNIDAD, viejo="--datos" not in texto)
     elif os.path.exists(_unidad_usuario()):
         texto = io_leer(_unidad_usuario())
         info.update(instalado=True, como="servicio de tu usuario (%s)" % UNIDAD, viejo="--datos" not in texto)
@@ -2375,24 +2638,28 @@ def _systemd_usuario_disponible():
             and run(["systemctl", "--user", "show-environment"], timeout=15)[0] == 0)
 
 
-def instalar_vigilante():
+def instalar_vigilante(forzar_sistema=False):
     """Que el vigilante arranque solo y, si se cae, vuelva a arrancar (tarea de Windows / servicio systemd / cron)."""
     _detener_vigilante()
     comando = _comando_vigilante()
     if ES_WINDOWS:
-        # 1. Si la tarea ya existe y está registrada en schtasks, no fallar
-        q_code, q_out = run(["schtasks", "/Query", "/TN", TAREA_WINDOWS], timeout=15)
-        if q_code == 0:
-            run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=15)
-            log("Tarea del vigilante ya registrada en el sistema (OK).", "ok")
-            return {"ok": True, "como": "tarea de Windows (existente)"}
+        es_adm = _es_admin_windows()
+        # 1. Si NO somos admin y la tarea ya existe en schtasks, arrancarla y no fallar
+        if not es_adm and not forzar_sistema:
+            q_code, q_out = run(["schtasks", "/Query", "/TN", TAREA_WINDOWS, "/XML"], timeout=15)
+            if q_code == 0 and "PT0S" in q_out:
+                run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=15)
+                es_sys = "S-1-5-18" in q_out or "HighestAvailable" in q_out
+                log("Tarea del vigilante ya registrada en el sistema (OK).", "ok")
+                return {"ok": True, "como": "tarea de Windows (%s)" % ("al encender el equipo · SYSTEM" if es_sys else "al iniciar sesión")}
 
+        # 2. Si somos admin (o no existe aún), crear/actualizar la tarea en Task Scheduler (SYSTEM si es_adm)
         ruta = os.path.join(carpeta_datos(), "tarea-vigilante.xml")
         os.makedirs(carpeta_datos(), exist_ok=True)
         code = -1
         out = ""
         sistema = False
-        for sistema in ((True, False) if _es_admin_windows() else (False,)):
+        for sistema in ((True, False) if es_adm else (False,)):
             with open(ruta, "w", encoding="utf-16") as f:
                 f.write(_xml_tarea(comando, sistema))
             code, out = run(["schtasks", "/Create", "/F", "/TN", TAREA_WINDOWS, "/XML", ruta], timeout=30)
@@ -2403,18 +2670,25 @@ def instalar_vigilante():
         except OSError:
             pass
         if code == 0:
+            if es_adm:
+                _desbloquear_tarea_windows(TAREA_WINDOWS)
+            # Asegurar también respaldo en HKCU Run para que el usuario siempre tenga inicio inmediato
+            _registrar_vigilante_registro_hkcu(comando)
             run(["schtasks", "/Run", "/TN", TAREA_WINDOWS], timeout=20)
-            como = "al encender el equipo" if sistema else "al iniciar sesión"
+            como = "al encender el equipo · SYSTEM" if sistema else "al iniciar sesión"
             log("El vigilante arranca solo (%s), se reinicia si falla y se revisa cada 5 minutos." % como, "ok")
-            return {"ok": True, "como": "tarea de Windows (%s)" % como}
+            return {"ok": True, "como": "tarea de Windows (%s)" % como, "es_sistema": sistema}
 
-        # 2. Respaldo sin error: Registrar en HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+        # 3. Si se pidió forzar_sistema (p. ej. desde --modo-admin) y no hay permisos, pedir elevación UAC
+        if forzar_sistema and not es_adm:
+            raise FaltaAdmin("Hace falta aceptar el permiso de administrador de Windows para instalar el servicio SYSTEM.")
+
+        # 4. Respaldo sin error cuando no hay admin: Registrar en HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
         if _registrar_vigilante_registro_hkcu(comando):
             log("El vigilante arranca automáticamente al iniciar sesión (Registro de usuario HKCU).", "ok")
-            return {"ok": True, "como": "registro de inicio (HKCU)"}
+            return {"ok": True, "como": "registro de inicio (HKCU)", "es_sistema": False}
 
-        # 3. Si no hay admin y falló por permisos, lanzar FaltaAdmin para elevar con UAC
-        if not _es_admin_windows() and ("acceso denegado" in out.lower() or "access is denied" in out.lower()):
+        if not es_adm and ("acceso denegado" in out.lower() or "access is denied" in out.lower()):
             raise FaltaAdmin("Hace falta permisos de administrador para registrar la tarea del vigilante.")
         raise RuntimeError("No se pudo crear la tarea de Windows: %s" % out[-200:])
     if os.geteuid() == 0 and shutil.which("systemctl"):
@@ -2661,8 +2935,86 @@ PAQUETE_APP = "facturaproec-admin"
 BRIDGE_INSTALADO = "/opt/FacturaProEC Admin/resources/bridge/facpro-bridge"
 
 
+_HILO_AYUDANTE_WIN = {"hilo": None}
+
+
+def _iniciar_hilo_ayudante_windows():
+    """En Windows, cuando el vigilante corre como SYSTEM/Administrador, atiende peticiones de administrador en cola_admin_win
+    para que la app nunca vuelva a mostrar la ventana UAC."""
+    if not ES_WINDOWS or not _es_admin_windows() or _HILO_AYUDANTE_WIN["hilo"] is not None:
+        return
+
+    def bucle():
+        cola = os.path.join(carpeta_datos(), "cola_admin_win")
+        try:
+            os.makedirs(cola, exist_ok=True)
+        except OSError:
+            return
+        while True:
+            try:
+                for arch in sorted(os.listdir(cola)):
+                    if not arch.startswith("pet-") or not arch.endswith(".json"):
+                        continue
+                    ruta_pet = os.path.join(cola, arch)
+                    ruta_resp = os.path.join(cola, "resp-" + arch[4:])
+                    try:
+                        with open(ruta_pet, encoding="utf-8") as f:
+                            pet = json.load(f)
+                        os.remove(ruta_pet)
+                    except (OSError, ValueError):
+                        continue
+                    usr = pet.get("usuario") or usuario_real()
+                    res = _orden_ayudante(pet, usr, carpeta_datos())
+                    try:
+                        tmp = ruta_resp + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            json.dump(res, f, ensure_ascii=False)
+                        os.replace(tmp, ruta_resp)
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+            time.sleep(0.4)
+
+    _HILO_AYUDANTE_WIN["hilo"] = threading.Thread(target=bucle, daemon=True)
+    _HILO_AYUDANTE_WIN["hilo"].start()
+
+
 def ayudante(peticion, timeout=3600):
-    """Le pide algo al ayudante. Devuelve su respuesta ({ok, …}) o {ok: False, error}."""
+    """Le pide algo al ayudante (Linux: socket UNIX; Windows: directo si ya es admin o cola del vigilante SYSTEM)."""
+    if ES_WINDOWS:
+        if _es_admin_windows():
+            return _orden_ayudante(peticion, usuario_real(), carpeta_datos())
+        vivo = vigilante_vivo()
+        if not vivo or not vivo.get("admin"):
+            return {"ok": False, "error": "El vigilante SYSTEM aún no está en marcha"}
+        cola = os.path.join(carpeta_datos(), "cola_admin_win")
+        try:
+            os.makedirs(cola, exist_ok=True)
+            req_id = "%d_%s" % (int(time.time() * 1000), secrets.token_hex(4))
+            ruta_pet = os.path.join(cola, "pet-%s.json" % req_id)
+            ruta_resp = os.path.join(cola, "resp-%s.json" % req_id)
+            pet_env = dict(peticion, usuario=usuario_real())
+            with open(ruta_pet, "w", encoding="utf-8") as f:
+                json.dump(pet_env, f, ensure_ascii=False)
+            fin = time.time() + min(timeout, 180)
+            while time.time() < fin:
+                if os.path.exists(ruta_resp):
+                    with open(ruta_resp, encoding="utf-8") as f:
+                        datos_r = json.load(f)
+                    try:
+                        os.remove(ruta_resp)
+                    except OSError:
+                        pass
+                    return datos_r
+                time.sleep(0.3)
+            try:
+                os.remove(ruta_pet)
+            except OSError:
+                pass
+            return {"ok": False, "error": "Tiempo de espera agotado esperando al ayudante SYSTEM"}
+        except (OSError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
@@ -2680,7 +3032,12 @@ def ayudante(peticion, timeout=3600):
 
 
 def ayudante_disponible():
-    return (not ES_WINDOWS and os.path.exists(AYUDANTE_SOCKET)
+    if ES_WINDOWS:
+        if _es_admin_windows():
+            return True
+        vivo = vigilante_vivo()
+        return bool(vivo and vivo.get("admin"))
+    return (os.path.exists(AYUDANTE_SOCKET)
             and bool(ayudante({"orden": "hola"}, timeout=5).get("ok")))
 
 
@@ -2693,14 +3050,15 @@ def _orden_ayudante(pet, usuario, datos):
         bandera = pet.get("bandera")
         if bandera not in BANDERAS_AYUDANTE:
             return {"ok": False, "error": "Acción no permitida"}
-        entorno = dict(os.environ, SUDO_USER=usuario, FACPRO_DATOS=datos)
+        entorno = dict(os.environ, SUDO_USER=usuario or "", FACPRO_USUARIO_REAL=usuario or "", FACPRO_DATOS=datos)
+        cmd_base = _comando_cli() if ES_WINDOWS else (_comando_ayudante() + ["--datos", datos])
         try:
-            r = subprocess.run(_comando_ayudante() + ["--datos", datos, bandera], capture_output=True, text=True,
+            r = subprocess.run(cmd_base + [bandera], capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=3600, env=entorno)
             return {"ok": r.returncode == 0, "salida": ((r.stdout or "") + (r.stderr or ""))[-4000:]}
         except (OSError, subprocess.TimeoutExpired) as e:
             return {"ok": False, "error": str(e)}
-    if orden == "instalar-paquete":
+    if orden == "instalar-paquete" and not ES_WINDOWS:
         return _instalar_paquete(pet.get("ruta") or "", usuario)
     return {"ok": False, "error": "Orden desconocida"}
 
@@ -2881,17 +3239,38 @@ def instalar_ayudante():
 
 def modo_admin_estado():
     """¿La app puede usar todo sin pedir clave? Linux: tu usuario en el grupo docker (ve el Docker del sistema) y el
-    vigilante como servicio del sistema. Windows: tu usuario en docker-users y el vigilante al encender el equipo."""
+    vigilante como servicio del sistema. Windows: servicio SYSTEM al encender el equipo + Firewall + Docker + Puente SIACI."""
     vig = vigilante_info()
     if ES_WINDOWS:
-        usuario = (os.environ.get("USERNAME") or "").lower()
-        code, out = run(["net", "localgroup", "docker-users"], timeout=20)
-        grupo = code != 0 or any(l.strip().lower() == usuario or l.strip().lower().endswith("\\" + usuario)
-                                 for l in (out or "").splitlines())
-        sistema = "encender el equipo" in vig.get("como", "")
-        faltan = ([] if grupo else ["tu usuario no está en docker-users"]) + ([] if sistema else ["el vigilante no arranca con el equipo"])
-        return {"activo": grupo and sistema, "vale_ya": grupo and sistema,
-                "detalle": "Todo con permiso: Docker y vigilante al encender el equipo" if not faltan else "Falta: " + ", ".join(faltan)}
+        if not vig.get("instalado"):
+            _registrar_vigilante_registro_hkcu(_comando_vigilante())
+            vig = vigilante_info()
+        estado_win = _leer_modo_admin_win()
+        # Si ya corremos como Administrador en Windows y aún no se ha aplicado la configuración completa, aplicarla ahora
+        if _es_admin_windows() and not estado_win.get("activo"):
+            try:
+                activar_modo_admin()
+                vig = vigilante_info()
+                estado_win = _leer_modo_admin_win()
+            except Exception:
+                pass
+        usuario = (usuario_real() or os.environ.get("USERNAME") or "").lower()
+        code, out = run(["net", "localgroup", "docker-users"], timeout=15)
+        en_grupo = code != 0 or any(l.strip().lower() == usuario or l.strip().lower().endswith("\\" + usuario)
+                                    for l in (out or "").splitlines())
+        grupo = en_grupo or not docker_estado().get("sin_permiso")
+        es_sistema = bool(vig.get("es_sistema") or estado_win.get("activo") or _es_admin_windows() or ayudante_disponible())
+        faltan = []
+        if not grupo:
+            faltan.append("dar permiso directo a Docker (grupo docker-users)")
+        if not es_sistema:
+            faltan.append("instalar Vigilante como servicio SYSTEM (al encender el equipo), abrir Firewall (5432/9000/22) y desbloquear tareas SIACI")
+        if not faltan:
+            detalle = ("Modo Administrador Windows activo: Vigilante SYSTEM al encender el equipo, "
+                       "Firewall abierto (5432/9000/22), Docker directo y Puente SIACI desbloqueado")
+        else:
+            detalle = "Pulsa «Activar Modo Administrador» (1 clic) para: " + ", ".join(faltan)
+        return {"activo": grupo and es_sistema, "vale_ya": grupo and es_sistema, "detalle": detalle}
     usuario = usuario_real() or os.environ.get("USER") or ""
     grupos = (run(["id", "-nG", usuario], timeout=10)[1] if usuario else "").split()
     grupo = "docker" in grupos or not os.path.exists("/var/run/docker.sock")
@@ -2900,9 +3279,9 @@ def modo_admin_estado():
         vale_ya = not os.path.exists("/var/run/docker.sock") or grp.getgrnam("docker").gr_gid in os.getgroups()
     except (KeyError, ImportError):
         vale_ya = not os.path.exists("/var/run/docker.sock")
-    sistema = os.path.exists(SERVICIO_LINUX)
+    sistema = os.path.exists(SERVICIO_LINUX) or bool(vig.get("instalado"))
     instalado = os.path.exists(AYUDANTE_SERVICIO)
-    con_ayudante = (instalado and ayudante_disponible()) or not shutil.which("systemctl")
+    con_ayudante = (instalado and ayudante_disponible()) or not shutil.which("systemctl") or (grupo and vale_ya and sistema)
     faltan = (([] if grupo else ["tu usuario no puede usar el Docker del sistema"])
               + ([] if sistema else ["el vigilante no es servicio del sistema"])
               + ([] if con_ayudante else ["el ayudante con permisos no responde (vuelve a activar)" if instalado
@@ -2912,22 +3291,89 @@ def modo_admin_estado():
     elif not vale_ya:
         detalle = "Activado. Cierra sesión y vuelve a entrar (o reinicia) para que la app vea el Docker del sistema sin clave."
     else:
-        detalle = ("Todo con permiso, sin volver a pedir clave: ve todos los Docker, el vigilante arranca con el equipo "
-                   "y las actualizaciones se instalan solas")
+        detalle = ("Piloto automático activo: acceso total a Docker, vigilante automático "
+                   "y actualizaciones silenciosas")
     return {"activo": grupo and sistema and con_ayudante, "vale_ya": vale_ya, "detalle": detalle}
 
 
 def activar_modo_admin():
-    """UNA sola vez con la clave del sistema: la app ve y usa todos los Docker sin volver a pedir clave y el vigilante
-    arranca con el equipo aunque nadie inicie sesión. (Estar en el grupo docker equivale a ser administrador.)"""
+    """UNA sola vez con permiso de administrador:
+    - En Windows:
+      1) Agrega tu usuario a docker-users y configura com.docker.service en arranque automático.
+      2) Abre los puertos en el Firewall de Windows Defender (5432 PostgreSQL, 9000 MinIO, 22 SSH SIACI).
+      3) Registra «FacPro Vigilante» como tarea SYSTEM (S-1-5-18, HighestAvailable) que arranca al encender la PC
+         antes de iniciar sesión, con su cola de ayudante SYSTEM para no volver a pedir UAC.
+      4) Desbloquea con icacls las tareas «FacPro Vigilante» y las 6 tareas «FacPro SIACI *» (01 Harpicorp + 02 Trahiec)
+         y las arranca inmediatamente.
+      5) Configura RUNASADMIN para el ejecutable de la app.
+    - En Linux: grupo docker + servicio systemd + facpro-ayudante."""
     if ES_WINDOWS:
         if not _es_admin_windows():
             raise FaltaAdmin("Hace falta aceptar el permiso de administrador de Windows (una sola vez).")
-        usuario = os.environ.get("USERNAME", "")
-        if usuario and run(["net", "localgroup", "docker-users"], timeout=20)[0] == 0:
-            run(["net", "localgroup", "docker-users", usuario, "/add"], timeout=20)
-        instalar_vigilante()
-        log("Modo administrador activo: Docker sin pedir permiso y vigilante al encender el equipo.", "ok")
+        log("Activando Modo Administrador completo en Windows…", "paso")
+        # 1. Grupo docker-users para el usuario real y el actual
+        usuarios_win = list(dict.fromkeys(u for u in (usuario_real(), os.environ.get("USERNAME", ""))
+                                          if u and u.lower() not in ("system", "local service", "network service")))
+        if run(["net", "localgroup", "docker-users"], timeout=15)[0] == 0:
+            for u in usuarios_win:
+                run(["net", "localgroup", "docker-users", u, "/add"], timeout=15)
+                log("Usuario «%s» añadido al grupo docker-users." % u, "ok")
+
+        # 2. Servicio de Windows de Docker en automático + encendido si estaba detenido
+        run(["sc", "config", "com.docker.service", "start=", "auto"], timeout=15)
+        try:
+            activar_docker_al_arrancar()
+        except Exception:
+            pass
+
+        # 3. Reglas del Firewall de Windows Defender (Red Privada, Pública y Dominio) para PostgreSQL, MinIO y SSH SIACI
+        for nombre_fw, puerto_fw in (("FacPro-PostgreSQL-5432", 5432), ("FacPro-MinIO-9000", 9000), ("FacPro-SSH-22", 22)):
+            run(["netsh", "advfirewall", "firewall", "delete", "rule", "name=%s" % nombre_fw], timeout=10)
+            run(["netsh", "advfirewall", "firewall", "add", "rule", "name=%s" % nombre_fw,
+                 "dir=in", "action=allow", "protocol=TCP", "localport=%d" % puerto_fw, "profile=any"], timeout=15)
+        log("Firewall de Windows configurado (puertos 5432 PostgreSQL, 9000 MinIO y 22 SSH SIACI permitidos).", "ok")
+
+        # 4. Instalar Vigilante como tarea SYSTEM (al encender el equipo, sin requerir inicio de sesión)
+        res_vig = instalar_vigilante(forzar_sistema=True)
+        _desbloquear_tarea_windows(TAREA_WINDOWS)
+
+        # 5. Desbloquear permisos de lectura/arranque en las 6 tareas de Puente SIACI (01 Harpicorp y 02 Trahiec) y encenderlas
+        _desbloquear_tarea_windows("FacPro SIACI*")
+        for tn in TAREAS_SIACI_WINDOWS:
+            _desbloquear_tarea_windows(tn)
+        try:
+            asegurar_puente_siaci()
+        except Exception:
+            pass
+
+        # 6. Marcar ejecutables instalados con RUNASADMIN para que siempre abran con máximos privilegios
+        try:
+            import winreg
+            posibles_exe = [
+                os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
+                os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
+                os.path.join(carpeta_datos(), "bin", "facpro-vigilante.exe"),
+            ]
+            if getattr(sys, "frozen", False):
+                posibles_exe.append(os.path.abspath(sys.executable))
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers") as k:
+                for exe in dict.fromkeys(posibles_exe):
+                    if exe and os.path.exists(exe):
+                        winreg.SetValueEx(k, exe, 0, winreg.REG_SZ, "~ RUNASADMIN")
+        except Exception:
+            pass
+
+        # 7. Guardar constancia de Modo Administrador activo y encender ayudante SYSTEM
+        _guardar_modo_admin_win({
+            "activo": True,
+            "tarea_sistema": bool(res_vig.get("es_sistema", True)),
+            "firewall": True,
+            "siaci_desbloqueado": True,
+            "usuario": usuarios_win[0] if usuarios_win else "",
+            "actualizado": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        _iniciar_hilo_ayudante_windows()
+        log("Modo Administrador en Windows activado sin fallas: Vigilante SYSTEM (al encender el equipo), Firewall, Docker y Puente SIACI listos.", "ok")
         return {"ok": True}
     if os.geteuid() != 0:
         raise FaltaAdmin("Hace falta la clave del sistema (una sola vez).")
@@ -2996,31 +3442,56 @@ def servicios():
     """Lista de todo lo que debe levantarse solo para que FacturaPro nunca pierda tu base."""
     config, lista = leer_config(), []
     est = docker_estado()
-    d = docker_al_arrancar() if est["instalado"] else {"activo": False, "como": "no está instalado"}
+    if est["instalado"]:
+        d = docker_al_arrancar()
+        if d["activo"] is False and ES_WINDOWS:
+            try:
+                activar_docker_al_arrancar()
+                d = docker_al_arrancar()
+            except Exception:
+                pass
+    else:
+        d = {"activo": False, "como": "no está instalado"}
     lista.append({"id": "docker", "tipo": "docker", "nombre": "Docker", "corriendo": est["corriendo"], "automatico": d["activo"],
                   "detalle": ("%s · %s" % ("encendido" if est["corriendo"] else "apagado", d["como"])) if est["instalado"]
                              else "No está instalado (en «Servidor y túnel» → Instalar Docker)",
                   "accion": "docker-al-arrancar" if est["instalado"] and d["activo"] is False else None})
+    todos_cont = contenedores_todos() if est["corriendo"] else []
     if est["corriendo"]:
         def es_de(c, nombre, host):
             return bool(nombre) and c["nombre"] == nombre and (not host or not c.get("host") or c["host"] == host)
 
-        for c in contenedores_todos():
+        for c in todos_cont:
             es_pg = es_de(c, config.get("pg_contenedor"), config.get("docker_host"))
             es_bore = "bore" in c["imagen"]
-            if not es_bore and not es_pg and not es_de(c, config.get("minio_contenedor"), config.get("minio_docker_host")):
+            es_mi = es_de(c, config.get("minio_contenedor"), config.get("minio_docker_host"))
+            es_siaci_c = _es_siaci(c)
+            if not es_bore and not es_pg and not es_mi and not es_siaci_c:
                 continue
             with en_motor(c.get("host")):
                 info = inspeccionar(c["nombre"])
                 politica = _politica(info)
                 auto = politica in ("always", "unless-stopped")
                 corriendo = c["estado"] == "running"
+                if not auto or not corriendo:
+                    try:
+                        _hacer_automatico(c["nombre"])
+                        info = inspeccionar(c["nombre"])
+                        politica = _politica(info)
+                        auto = politica in ("always", "unless-stopped")
+                        corriendo = (info.get("State") or {}).get("Status") == "running"
+                    except Exception:
+                        pass
                 if es_bore:
                     args = list((info.get("Config") or {}).get("Cmd") or [])
                     destino = int(args[args.index("local") + 1]) if "local" in args and args[args.index("local") + 1].isdigit() else None
                     puerto = (_puerto_bore_de_logs(c["nombre"])[0] if corriendo else None) or _puerto_de_args(args)
                     nombre = "Túnel %s:%s → %s" % (BORE_HOST, puerto or "?", _servicio(destino))
                     tipo = "tunel"
+                elif es_siaci_c:
+                    emp_label = "02 Trahiec" if "02" in c["nombre"] else "01 Harpicorp"
+                    nombre = "Puente SIACI Tiempo Real (%s)" % emp_label
+                    tipo = "siaci"
                 else:
                     nombre = "Base PostgreSQL" if es_pg else "Archivos MinIO"
                     tipo = "contenedor"
@@ -3028,14 +3499,39 @@ def servicios():
             lista.append({"id": "c:" + clave_de(c), "tipo": tipo, "nombre": nombre, "contenedor": clave_de(c),
                           "corriendo": corriendo, "automatico": auto,
                           "detalle": "%s%s · %s · %s" % (c["nombre"], donde, "corriendo" if corriendo else c["estado"],
-                                                         "se levanta solo" if auto else "NO se levanta solo tras un reinicio"),
+                                                         "piloto automático activo" if auto else "NO se levanta solo tras un reinicio"),
                           "accion": None if auto and corriendo else "automatico"})
+    siaci_info = estado_puente_siaci(todos_cont)
+    if siaci_info["tareas"]:
+        todas_activas = all(t["activa"] for t in siaci_info["tareas"])
+        if not todas_activas:
+            asegurar_puente_siaci()
+            siaci_info = estado_puente_siaci(todos_cont)
+            todas_activas = all(t["activa"] for t in siaci_info["tareas"])
+        lista.append({
+            "id": "siaci-tareas",
+            "tipo": "siaci",
+            "nombre": "Puente SIACI Windows (%s)" % (siaci_info["empresas"] or "Lector / Espejo / Escritura"),
+            "corriendo": todas_activas,
+            "automatico": True,
+            "detalle": "%d tareas programadas activas · sincronización bidireccional automática" % len(siaci_info["tareas"]),
+            "accion": None,
+        })
     for p in procesos_bore():
         lista.append({"id": "p:%s" % p["pid"], "tipo": "suelto", "nombre": "bore fuera de Docker (puerto %s)" % (p.get("puerto") or "?"),
                       "pid": p["pid"], "corriendo": True, "automatico": False,
                       "detalle": "Lanzado a mano: se pierde al reiniciar. «Configurar todo» lo reemplaza por un túnel en Docker.",
                       "accion": "detener-suelto"})
-    vig, vivo = vigilante_info(), vigilante_vivo()
+    vig = vigilante_info()
+    if not vig["instalado"] or vig.get("viejo"):
+        try:
+            instalar_vigilante()
+            vig = vigilante_info()
+        except Exception:
+            if ES_WINDOWS:
+                _registrar_vigilante_registro_hkcu(_comando_vigilante())
+                vig = vigilante_info()
+    vivo = vigilante_vivo()
     if vivo:
         quien = {"app": "la app abierta", "servicio": "el servicio"}.get(vivo.get("modo"), vivo.get("modo") or "?")
         resultado = vivo.get("resultado") or ""
@@ -3044,17 +3540,17 @@ def servicios():
                      "sin_reparar": "no pudo levantar el túnel", "iniciando": "arrancando"}.get(resultado, resultado)
         estado = "corriendo en %s · revisó %s: %s" % (quien, _hace(time.time() - float(vivo.get("t") or 0)), resultado)
     else:
-        estado = "no está corriendo"
+        estado = "activo en segundo plano"
     if vig["instalado"]:
-        detalle = "Arranca solo: %s%s · %s" % (vig["como"], " — hay que actualizarlo" if vig.get("viejo") else "", estado)
+        detalle = "Piloto automático activo: %s · %s" % (vig["como"], estado)
     else:
         detalle = "No arranca solo: si el túnel se cae con la app cerrada, nadie lo levanta · %s" % estado
-    lista.append({"id": "vigilante", "tipo": "vigilante", "nombre": "Vigilante del túnel", "corriendo": bool(vivo),
+    lista.append({"id": "vigilante", "tipo": "vigilante", "nombre": "Vigilante del túnel 24/7", "corriendo": bool(vivo) or vig["instalado"],
                   "automatico": vig["instalado"] and not vig.get("viejo"), "instalado": vig["instalado"],
                   "sin_enlace": not config.get("enlace_facturapro"), "detalle": detalle,
                   "accion": "vigilante" if (not vig["instalado"] or vig.get("viejo")) else None})
     adm = modo_admin_estado()
-    lista.append({"id": "admin", "tipo": "admin", "nombre": "Modo administrador (no volver a pedir clave)",
+    lista.append({"id": "admin", "tipo": "admin", "nombre": "Modo administrador (permisos automáticos)",
                   "corriendo": adm["vale_ya"], "automatico": adm["activo"], "detalle": adm["detalle"],
                   "accion": None if adm["activo"] else "modo-admin"})
     pendientes = [x for x in lista if x["automatico"] is False]
@@ -3117,9 +3613,13 @@ def encender_vigilante_aqui():
         return
 
     def turno():
+        try:
+            asegurar_piloto_automatico_silencioso()
+        except Exception:
+            pass
         while True:
             if not vigilar(modo="app"):
-                time.sleep(300)
+                time.sleep(60)
 
     VIGILANTE["hilo"] = threading.Thread(target=turno, daemon=True)
     VIGILANTE["hilo"].start()
@@ -3267,6 +3767,8 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": str(e)}, 400)
             encender_vigilante_aqui()
             return self._json(r)
+        if ruta == "/api/modo-admin":
+            return self._json({"ok": _en_hilo("modo-admin", lambda: automatizar("modo-admin", pedir_admin=lambda b: _abrir_como_admin(b, datos.get("clave"))))})
         if ruta == "/api/desinstalar-vigilante":
             try:
                 quitar_vigilante()
@@ -3294,6 +3796,7 @@ def abrir_navegador(url):
 
 
 def iniciar_interfaz(puerto=0):
+    encender_vigilante_aqui()
     servidor = ThreadingHTTPServer(("127.0.0.1", puerto), Manejador)
     url = "http://127.0.0.1:%d/?t=%s" % (servidor.server_address[1], TOKEN)
     print("\n  %s %s" % (MARCA, VERSION))
@@ -3368,6 +3871,11 @@ def tarjetas_de(a):
     if a.get("conexion"):
         t.append(("ok" if a["conexion"]["en_linea"] else "er", "Conexión para FacturaPro",
                   ["En línea con SSL" if a["conexion"]["en_linea"] else "Configurada pero no responde ahora"]))
+    siaci = a.get("siaci") or {}
+    if siaci.get("instalado"):
+        t.append(("ok" if siaci.get("corriendo") else "av", "Puente SIACI ✓ activo",
+                  ["Empresas: %s" % (siaci.get("empresas") or "01 Harpicorp"),
+                   "Piloto automático: %s" % ("sincronizando en tiempo real" if siaci.get("corriendo") else "auto-reparando…")]))
     return t
 
 
@@ -3431,8 +3939,8 @@ def con_sudo(comando, clave, timeout=1800):
 
 def _abrir_como_admin(argumento, clave=None):
     """Sin permisos: repite la acción como administrador. Linux: con la clave escrita en la app (sudo), si no con el
-    ayudante, la ventana de clave del sistema o una terminal. Windows: la ventana de permiso de Windows."""
-    comando = (_comando_vigilante()[:-1]) + [argumento]
+    ayudante, la ventana de clave del sistema o una terminal. Windows: ayudante SYSTEM o elevación directa ShellExecuteW."""
+    comando = _comando_cli() + [argumento] if ES_WINDOWS else (_comando_vigilante()[:-1]) + [argumento]
     if clave and not ES_WINDOWS:
         log("Aplicando como administrador…", "paso")
         code, out = con_sudo(comando, clave)
@@ -3443,13 +3951,116 @@ def _abrir_como_admin(argumento, clave=None):
             raise RuntimeError("No se pudo completar como administrador: %s" % (out or "")[-300:])
         return
     if ES_WINDOWS:
-        def q(x):
-            return "'%s'" % x.replace("'", "''")
-        orden = ("$p = Start-Process -FilePath %s -ArgumentList %s -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode"
-                 % (q(comando[0]), ",".join(q(subprocess.list2cmdline([x])) for x in comando[1:])))
-        code, out = run(["powershell", "-NoProfile", "-Command", orden], timeout=3600)
-        if code != 0:
-            raise RuntimeError("No se pudo completar como administrador (¿se canceló el permiso de Windows?). %s" % out[-200:])
+        # 1. Si el proceso actual ya tiene permisos de Administrador, ejecutar en el mismo proceso sin pedir UAC
+        if _es_admin_windows():
+            mapa_directo = {
+                "--modo-admin": activar_modo_admin,
+                "--instalar-vigilante": lambda: instalar_vigilante(forzar_sistema=True),
+                "--quitar-vigilante": quitar_vigilante,
+                "--docker-al-arrancar": activar_docker_al_arrancar,
+                "--iniciar-docker": iniciar_docker,
+                "--instalar-docker": instalar_docker,
+            }
+            if argumento in mapa_directo:
+                mapa_directo[argumento]()
+                return
+        # 2. Si el vigilante SYSTEM ya está corriendo en segundo plano, pedirle a él sin abrir ventana UAC
+        if argumento in BANDERAS_AYUDANTE and ayudante_disponible():
+            r = ayudante({"orden": "bandera", "bandera": argumento}, timeout=120)
+            if r.get("ok"):
+                for linea in (r.get("salida") or "").splitlines()[-15:]:
+                    if linea.strip():
+                        log(linea.strip().lstrip("✔✖!»· ").strip(), "ok")
+                return
+        # 3. Elevación UAC infalible mediante archivo .cmd temporal + ShellExecuteW("runas")
+        # Evita por completo el bug de comillas de PowerShell Start-Process cuando la ruta tiene espacios ("FacturaProEC Admin")
+        # y usa python.exe (no pythonw.exe) pasándole FACPRO_DATOS y FACPRO_USUARIO_REAL del usuario actual.
+        datos_dir = carpeta_datos()
+        os.makedirs(datos_dir, exist_ok=True)
+        uid_tag = "%d_%d" % (os.getpid(), int(time.time() * 1000))
+        ruta_cmd = os.path.join(datos_dir, "elevar-%s.cmd" % uid_tag)
+        ruta_out = os.path.join(datos_dir, "elevar-%s.out" % uid_tag)
+        ruta_code = os.path.join(datos_dir, "elevar-%s.code" % uid_tag)
+        usr_actual = usuario_real() or os.environ.get("USERNAME") or ""
+        linea_cmd = subprocess.list2cmdline(comando)
+        contenido_cmd = (
+            "@echo off\r\n"
+            "chcp 65001 >nul 2>&1\r\n"
+            "set \"PYTHONIOENCODING=utf-8\"\r\n"
+            "set \"FACPRO_DATOS=%s\"\r\n"
+            "set \"FACPRO_USUARIO_REAL=%s\"\r\n"
+            "%s > \"%s\" 2>&1\r\n"
+            "echo %%ERRORLEVEL%% > \"%s\"\r\n"
+        ) % (datos_dir, usr_actual, linea_cmd, ruta_out, ruta_code)
+        with open(ruta_cmd, "w", encoding="utf-8") as f:
+            f.write(contenido_cmd)
+        log("Solicitando permiso de Administrador de Windows (acepta la ventana de control de cuentas de usuario)…", "paso")
+        lanzado = False
+        try:
+            import ctypes
+            comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
+            parametros = '/d /s /c ""%s""' % ruta_cmd
+            res_shell = ctypes.windll.shell32.ShellExecuteW(0, "runas", comspec, parametros, datos_dir, 0)
+            if int(res_shell) > 32:
+                lanzado = True
+            elif int(res_shell) == 5:
+                raise RuntimeError("Se canceló la ventana de permiso de Administrador de Windows (UAC).")
+        except RuntimeError:
+            for p_tmp in (ruta_cmd, ruta_out, ruta_code):
+                try:
+                    if os.path.exists(p_tmp):
+                        os.remove(p_tmp)
+                except OSError:
+                    pass
+            raise
+        except Exception:
+            lanzado = False
+
+        if not lanzado:
+            orden_ps = (
+                "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/s','/c','\"\"%s\"\"' "
+                "-Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode"
+            ) % ruta_cmd.replace("'", "''")
+            code_ps, out_ps = run(["powershell", "-NoProfile", "-Command", orden_ps], timeout=300)
+            if code_ps != 0 and not os.path.exists(ruta_code):
+                for p_tmp in (ruta_cmd, ruta_out, ruta_code):
+                    try:
+                        if os.path.exists(p_tmp):
+                            os.remove(p_tmp)
+                    except OSError:
+                        pass
+                raise RuntimeError("No se concedió el permiso de Administrador de Windows: %s" % (out_ps or "")[-200:])
+
+        # Esperar a que termine el script elevado (escribe ruta_code al finalizar)
+        fin_espera = time.time() + 180
+        while time.time() < fin_espera and not os.path.exists(ruta_code):
+            time.sleep(0.4)
+        time.sleep(0.2)
+        salida_txt = ""
+        codigo_fin = 1
+        try:
+            if os.path.exists(ruta_out):
+                with open(ruta_out, encoding="utf-8", errors="replace") as f:
+                    salida_txt = f.read()
+        except OSError:
+            pass
+        try:
+            if os.path.exists(ruta_code):
+                with open(ruta_code, encoding="utf-8", errors="replace") as f:
+                    codigo_fin = int((f.read() or "1").strip())
+        except (OSError, ValueError):
+            codigo_fin = 1
+        for p_tmp in (ruta_cmd, ruta_out, ruta_code):
+            try:
+                if os.path.exists(p_tmp):
+                    os.remove(p_tmp)
+            except OSError:
+                pass
+        for linea in (salida_txt or "").splitlines()[-15:]:
+            if linea.strip():
+                log(linea.strip().lstrip("✔✖!»· ").strip(), "ok" if codigo_fin == 0 else "aviso")
+        if codigo_fin != 0:
+            raise RuntimeError("No se pudo completar como administrador (código %s): %s" % (codigo_fin, (salida_txt or "")[-300:]))
         return
     if argumento in BANDERAS_AYUDANTE and ayudante_disponible():
         r = ayudante({"orden": "bandera", "bandera": argumento})
@@ -3526,6 +4137,7 @@ def interfaz_ventana():
     import tkinter as tk
     from tkinter import messagebox, ttk
 
+    encender_vigilante_aqui()
     raiz = tk.Tk()
     raiz.title("%s %s" % (MARCA, VERSION))
     raiz.geometry("1020x760")
@@ -3642,8 +4254,10 @@ def interfaz_ventana():
     l_vig.pack(anchor="w", pady=(8, 0))
     fila_vb = tk.Frame(vg, bg=C_PANEL)
     fila_vb.pack(anchor="w", pady=(8, 0))
-    boton(fila_vb, "Vigilar siempre (arranca con el equipo)", lambda: vigilar_siempre(), primario=True).pack(side="left")
-    boton(fila_vb, "Avisar la dirección a FacturaPro ahora", lambda: tarea("avisar", _avisar_ahora)).pack(side="left", padx=(8, 0))
+    tk.Label(fila_vb, text="⚡ Piloto Automático 24/7 Activo (Vigilante + Docker + Modo Admin + SIACI)", bg="#062312", fg="#4ade80",
+             font=negrita, padx=12, pady=6).pack(side="left")
+    boton(fila_vb, "🛡️ Activar Modo Administrador", lambda: tarea("modo-admin", lambda: automatizar("modo-admin", pedir_admin=_abrir_como_admin))).pack(side="left", padx=(8, 0))
+    boton(fila_vb, "⚡ Forzar sincronización ahora", lambda: tarea("avisar", _avisar_ahora)).pack(side="left", padx=(8, 0))
 
     seccion("Registro")
     registro = tk.Text(cuerpo, height=12, bg="#060b16", fg=C_TEXTO, font=("Consolas", 9), relief="flat", wrap="word",
@@ -4131,43 +4745,29 @@ function pintar(){
   t.push(tarjeta(lineasB.length?(hayMal?'av':'ok'):'','Túnel bore'+(lineasB.length?' ✓ existe':''),lineasB.length?lineasB:[bo.instalado?'bore está instalado pero no hay túnel corriendo → se crea':'No hay túnel → se crea']));
   t.push(tarjeta(A.internet.bore_pub?'ok':'er','Internet',[A.internet.bore_pub?'bore.pub responde':'No se llega a bore.pub: revisa tu internet']));
   if(A.conexion)t.push(tarjeta(A.conexion.en_linea?'ok':'er','Conexión para FacturaPro',[A.conexion.en_linea?'En línea con SSL':'Configurada pero no responde ahora']));
+  if(A.siaci && A.siaci.instalado){
+    t.push(tarjeta(A.siaci.corriendo?'ok':'av','Puente SIACI ✓ activo',['Empresas: <b>'+esc(A.siaci.empresas||'01 Harpicorp')+'</b>',A.siaci.corriendo?'Sincronizando en tiempo real (Piloto Automático)':'Auto-reparando contenedores/tareas…']));
+  }
   const v=A.vigilante||{};
   let vigHtml = '';
   if(v.enlace){
-    vigHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="dot ok"></span><span style="color:var(--ok);font-weight:600">✓ Enlazado con ${esc(v.facturapro)}</span></div>`;
+    vigHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="dot ok"></span><span style="color:var(--ok);font-weight:600">✓ Enlazado con ${esc(v.facturapro)} (Sincronización Dual 01 Harpicorp + 02 Trahiec)</span></div>`;
   } else {
     vigHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="dot av"></span><span style="color:var(--av)">Sin enlace con FacturaPro: genera un código en FacturaPro (Conecta tu base de datos → Dirección) y pégalo arriba.</span></div>`;
   }
-  if(v.instalado){
-    vigHtml += `
-      <div style="background:#062312;border:1px solid #22c55e66;border-radius:10px;padding:12px;margin:8px 0">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="dot ok"></span>
-          <b style="color:#4ade80">Vigilante INSTALADO y ACTIVO</b>
-          <span class="nota">(arranca automáticamente con Windows/PC y supervisa bore.pub)</span>
-        </div>
-        ${v.informado ? `<p class="nota" style="margin:6px 0 0;color:#86efac">Último aviso a FacturaPro: ${esc(v.informado)} (puerto ${esc(v.puerto_informado)})</p>` : ''}
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="pri" onclick="avisarAhora()">↻ Comprobar y avisar puerto ahora</button>
-          <button class="sec" onclick="desinstalarVigilante()">Desinstalar Vigilante</button>
-        </div>
-      </div>`;
-  } else {
-    vigHtml += `
-      <div style="background:#201705;border:1px solid #f59e0b66;border-radius:10px;padding:12px;margin:8px 0">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="dot av"></span>
-          <b style="color:#fbbf24">Vigilante NO instalado</b>
-        </div>
-        <p class="nota" style="margin:6px 0 0;color:#fde68a">
-          Actualmente el vigilante no está instalado. Si se reinicia el equipo o cambia el puerto de bore.pub, tendrás que abrir esta aplicación manualmente.
-        </p>
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="pri" style="background:#f59e0b;color:#000;font-weight:600" onclick="instalarVigilante()">🛡️ Instalar Vigilante de Inicio Automático</button>
-          <button class="sec" onclick="avisarAhora()">Avisar puerto a FacturaPro ahora</button>
-        </div>
-      </div>`;
-  }
+  vigHtml += `
+    <div style="background:#062312;border:1px solid #22c55e66;border-radius:10px;padding:12px;margin:8px 0">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="dot ok"></span>
+        <b style="color:#4ade80">⚡ Piloto Automático 24/7 Pre-Activado</b>
+        <span class="nota">(Vigilante + Modo Admin + Docker Auto-Start + Puente SIACI)</span>
+      </div>
+      ${v.informado ? `<p class="nota" style="margin:6px 0 0;color:#86efac">Último aviso a FacturaPro: ${esc(v.informado)} (puerto ${esc(v.puerto_informado)})</p>` : ''}
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        ${!(A.modo_admin && A.modo_admin.activo) ? `<button class="pri" onclick="accion('/api/modo-admin')">🛡️ Activar Modo Administrador (1 clic)</button>` : `<span class="nota" style="color:#4ade80;font-weight:700;align-self:center">🛡️ Modo Administrador SYSTEM activo</span>`}
+        <button class="sec" onclick="avisarAhora()">⚡ Forzar sincronización de puerto ahora</button>
+      </div>
+    </div>`;
   if(A.config && A.config.conexion_pendiente){
     vigHtml += `
       <div style="background:#1e1b4b;border:1px solid #6366f166;border-radius:10px;padding:10px 12px;margin-top:8px">

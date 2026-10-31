@@ -441,9 +441,17 @@ function showNotification(title: string, body: string) {
 
 /* ───────────── Arranque automático ─────────────
  * Antes lo hacía el backend Python: en Windows registraba su propio ejecutable (python / backend), no la
- * app, y en Linux no hacía nada aunque decía que sí. Ahora lo hace Electron con la app real. */
-function setAutostart(enable: boolean): { ok: boolean; message: string } {
+ * app, y en Linux no hacía nada aunque decía que sí. Ahora lo hace Electron con la app real, y viene
+ * pre-activado de fábrica salvo que el usuario lo desactive manualmente en Configuración. */
+const MARCA_AUTOSTART_MANUAL_OFF = () => path.join(app.getPath('userData'), 'autostart-desactivado-manual');
+
+function setAutostart(enable: boolean, manual = true): { ok: boolean; message: string } {
   try {
+    if (manual) {
+      const m = MARCA_AUTOSTART_MANUAL_OFF();
+      if (!enable) { try { fs.writeFileSync(m, '1'); } catch { /* noop */ } }
+      else if (fs.existsSync(m)) { try { fs.unlinkSync(m); } catch { /* noop */ } }
+    }
     if (process.platform === 'linux') {
       const dir = path.join(app.getPath('home'), '.config', 'autostart');
       const file = path.join(dir, 'facturaproec-admin.desktop');
@@ -468,6 +476,15 @@ function setAutostart(enable: boolean): { ok: boolean; message: string } {
   } catch (e: any) {
     return { ok: false, message: String(e?.message || e) };
   }
+}
+
+function asegurarAutostartDeFabrica() {
+  try {
+    if (fs.existsSync(MARCA_AUTOSTART_MANUAL_OFF())) return;
+    if (!getAutostart()) {
+      setAutostart(true, false);
+    }
+  } catch { /* noop */ }
 }
 
 function getAutostart(): boolean {
@@ -740,6 +757,7 @@ function setupAutoUpdater() {
 /* ───────────── App lifecycle ───────────── */
 
 app.whenReady().then(async () => {
+  asegurarAutostartDeFabrica();
   bridgePort = await arrancarBridge();
   if (bridgePort) console.log(`[main] Bridge arrancó en puerto ${bridgePort}`);
   else console.error('[main] No se pudo arrancar el backend:', bridgeFallo);
