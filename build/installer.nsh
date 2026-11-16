@@ -14,10 +14,16 @@
 
 !macro customInstall
   DetailPrint "Activando Modo Administrador y Piloto Automático 24/7 en Windows…"
-  ; 1. Permisos de Docker sin pedir clave (grupo docker-users + servicio automático)
+  ; 0. Quitar marcas heredadas RUNASADMIN (el vigilante SYSTEM + tarea programada evitan ventanas UAC al abrir)
+  DeleteRegValue HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\FacturaProEC Admin.exe"
+  DeleteRegValue HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$LOCALAPPDATA\Programs\FacturaProEC Admin\FacturaProEC Admin.exe"
+  DeleteRegValue HKLM "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\FacturaProEC Admin.exe"
+  ; 1. Permisos de Docker sin pedir clave (grupo docker-users + servicio automático iniciado)
   nsExec::ExecToLog 'cmd.exe /c net localgroup docker-users "%USERNAME%" /add'
   Pop $0
   nsExec::ExecToLog 'sc config com.docker.service start= auto'
+  Pop $0
+  nsExec::ExecToLog 'sc start com.docker.service'
   Pop $0
 
   ; 2. Reglas de Firewall de Windows para PostgreSQL (5432), MinIO (9000) y SSH SIACI (22)
@@ -38,7 +44,13 @@
     Pop $0
   facpro_admin_listo:
 
-  ; 4. Desbloquear lectura y ejecución de tareas SYSTEM (FacPro Vigilante y FacPro SIACI*) para el usuario
+  ; 4. Tarea programada elevada al iniciar sesión (arranca oculto en bandeja SIN ventana UAC)
+  nsExec::ExecToLog 'schtasks /Create /TN "FacPro Server Manager" /TR "\"$INSTDIR\FacturaProEC Admin.exe\" --hidden" /SC ONLOGON /RL HIGHEST /F'
+  Pop $0
+  ; 5. Desbloquear lectura y ejecución de tareas SYSTEM (FacPro Vigilante, FacPro Server Manager y FacPro SIACI*)
   nsExec::ExecToLog 'icacls "$WINDIR\System32\Tasks\FacPro*" /grant "*S-1-5-11:(RX)" "*S-1-5-32-545:(RX)"'
+  Pop $0
+  ; 6. Activar ejecución inmediata del Vigilante SYSTEM 24/7
+  nsExec::ExecToLog 'schtasks /Run /TN "FacPro Vigilante"'
   Pop $0
 !macroend

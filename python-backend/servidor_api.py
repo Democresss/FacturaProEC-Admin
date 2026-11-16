@@ -237,10 +237,21 @@ def arrancar_vigilante_de_la_app() -> None:
 
 @router.post("/piloto-automatico")
 def piloto_automatico() -> Dict[str, Any]:
-    """Activa en silencio todos los servicios automáticos (Docker, Vigilante, Modo Admin, Puente SIACI 01+02)."""
+    """Activa en silencio todos los servicios automáticos (Docker, Vigilante, Modo Admin, autodetect y Puente SIACI 01+02)."""
     try:
         fs.asegurar_piloto_automatico_silencioso()
-        return {"ok": True, "data": fs.servicios(), "message": "Piloto Automático 24/7 activado."}
+        auto = fs.autodetectar_entorno(auto_iniciar=True)
+        return {"ok": True, "data": fs.servicios(), "autodetectado": auto, "message": "Piloto Automático 24/7 activado."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
+
+
+@router.post("/autodetectar")
+def autodetectar() -> Dict[str, Any]:
+    """Autodetecta y repara Docker, contenedores PostgreSQL/MinIO/Bore/SIACI y configuración sin clics manuales."""
+    try:
+        res = fs.autodetectar_entorno(auto_iniciar=True)
+        return {"ok": bool(res.get("ok", True)), "data": res, "message": "Entorno autodetectado y sincronizado."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e)}
 
@@ -256,8 +267,8 @@ def modo_linea_de_comandos(argv) -> Optional[int]:
     | --instalar-docker | --iniciar-docker | --modo-admin | --ayudante --uid N | --enlace CODIGO | --version.
     Antes «--ayudante» e «--iniciar-docker» no estaban en la lista: el servicio de root levantaba el servidor HTTP.
     Las banderas del ayudante salen de la misma herramienta para que no vuelva a pasar."""
-    banderas = (("--vigilar", "--instalar-vigilante", "--servicios", "--enlace", "--version", "--cli", "--analizar",
-                 "--ayudante") + tuple(fs.BANDERAS_AYUDANTE))
+    banderas = (("--vigilar", "--instalar-vigilante", "--servicios", "--autodetectar", "--enlace", "--version",
+                 "--cli", "--analizar", "--ayudante") + tuple(fs.BANDERAS_AYUDANTE))
     if any(b in argv for b in banderas):
         return fs.main(list(argv))
     return None

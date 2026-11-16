@@ -112,7 +112,7 @@
       ],
       "icon": "resources/icons/icon.ico",
       "artifactName": "FacturaProEC-Admin-${version}-${os}-${arch}.${ext}",
-      "requestedExecutionLevel": "highestAvailable",
+      "requestedExecutionLevel": "asInvoker",
       "signAndEditExecutable": false
     },
     "mac": {
@@ -173,8 +173,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
-      "requestExecutionLevel": "admin",
+      "perMachine": true,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

@@ -243,7 +243,16 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
     <div>
       <Card title="Servidor, Túnel y Puente SIACI (Piloto Automático 24/7)" icon={<span>🛰</span>}
             sub="Tu base de datos y el Puente SIACI en este equipo, siempre listos y auto-reparados para FacturaPro (01 Harpicorp + 02 Trahiec)."
-            right={<AsyncButton size="sm" onClick={() => analizar(pgElegido || undefined, minioElegido || undefined)}>↻ Revisar</AsyncButton>}>
+            right={(
+              <div className="row gap-8">
+                <AsyncButton size="sm" onClick={async () => {
+                  const res = await call('/api/servidor/autodetectar', { method: 'POST' });
+                  toast('Autodetección', res.message || 'Entorno sincronizado', res.ok ? 'success' : 'warning');
+                  await Promise.all([analizar(pgElegido || undefined, minioElegido || undefined), cargarServicios()]);
+                }}>🔍 Autodetectar</AsyncButton>
+                <AsyncButton size="sm" onClick={() => analizar(pgElegido || undefined, minioElegido || undefined)}>↻ Revisar</AsyncButton>
+              </div>
+            )}>
         {servs && !adminActivo ? (
           <div className="row between items-center gap-8" style={{ marginBottom: 12, padding: '12px 14px', borderRadius: 10, background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.40)' }}>
             <div>

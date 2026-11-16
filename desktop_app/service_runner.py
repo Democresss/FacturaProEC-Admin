@@ -509,6 +509,21 @@ class ServiceRunner:
                 except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
+            if enable:
+                # Limpiar posible RUNASADMIN que impide el arranque automático silencioso vía HKCU Run
+                try:
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                        0,
+                        winreg.KEY_SET_VALUE,
+                    ) as lk:
+                        try:
+                            winreg.DeleteValue(lk, exe_path)
+                        except FileNotFoundError:
+                            pass
+                except OSError:
+                    pass
             self.config.set('autostart', enable)
             return True, f"Inicio automático con Windows: {'Activado' if enable else 'Desactivado'}"
         except Exception as e:

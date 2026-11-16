@@ -469,6 +469,20 @@ function setAutostart(enable: boolean, manual = true): { ok: boolean; message: s
         // Entrada vieja que dejaba el backend apuntando a Python: se quita.
         spawn('reg', ['delete', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v',
                       'FacturaProECStorageManager', '/f'], { windowsHide: true }).on('error', () => {});
+        // Quitar cualquier marca RUNASADMIN heredada que bloquea HKCU\\Run o abre UAC en cada arranque.
+        spawn('reg', ['delete', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers',
+                      '/v', process.execPath, '/f'], { windowsHide: true }).on('error', () => {});
+        if (app.isPackaged && esAdministradorWindows()) {
+          if (enable) {
+            spawn('schtasks', [
+              '/Create', '/TN', 'FacPro Server Manager',
+              '/TR', `"${process.execPath}" --hidden`,
+              '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F',
+            ], { windowsHide: true }).on('error', () => {});
+          } else {
+            spawn('schtasks', ['/Delete', '/TN', 'FacPro Server Manager', '/F'], { windowsHide: true }).on('error', () => {});
+          }
+        }
       }
     }
     return { ok: true, message: enable ? `${NOMBRE} arrancará al iniciar sesión (en la bandeja)`

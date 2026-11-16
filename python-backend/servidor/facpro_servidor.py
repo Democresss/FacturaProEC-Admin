@@ -43,7 +43,7 @@ from urllib.parse import parse_qs, quote, urlparse
 VERSION = "1.16.17"
 MARCA = "FacPro Servidor"
 URL_FACTURAPRO = "https://facturadorproecuador.org/v2/conectar-bd"
-BORE_HOST = "bore.pub"
+BORE_HOST = (os.environ.get("FACPRO_BORE_HOST") or os.environ.get("BORE_HOST") or "bore.pub").strip() or "bore.pub"
 BORE_PUERTO_CONTROL = 7835
 ES_WINDOWS = os.name == "nt"
 DOCKER = os.environ.get("FACPRO_DOCKER", "docker")
@@ -142,11 +142,14 @@ def leer_eventos(desde=0.0):
     return eventos
 
 
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if ES_WINDOWS else 0
+
+
 def run(cmd, timeout=180, entrada=None, env=None):
     """Ejecuta un comando. Devuelve (código, salida+errores). Nunca lanza excepción."""
     try:
         r = subprocess.run(cmd, input=entrada, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, env=env)
+                           errors="replace", timeout=timeout, env=env, creationflags=_NO_WINDOW)
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except FileNotFoundError:
         return 127, "no encontrado: %s" % cmd[0]
@@ -263,11 +266,35 @@ def sin_secretos(config):
 # ─────────────────────────────── Docker ───────────────────────────────
 
 def _carpetas_docker_windows():
-    """Dónde puede estar Docker Desktop en Windows, de cualquier versión: Program Files, la instalación por usuario y
-    la carpeta del docker.exe que esté en el PATH (…/Docker/resources/bin/docker.exe → …/Docker)."""
+    """Dónde puede estar Docker Desktop en Windows, de cualquier versión: Program Files, la instalación por usuario,
+    el registro de Windows y la carpeta del docker.exe que esté en el PATH (…/Docker/resources/bin/docker.exe → …/Docker)."""
     carpetas = [os.path.join(os.environ.get(v) or "", "Docker", "Docker") for v in ("ProgramFiles", "ProgramW6432")]
     carpetas += [os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Docker", "Docker"),
                  r"C:\Program Files\Docker\Docker"]
+    if os.name == "nt":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for sub in (
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Docker Desktop.exe",
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop",
+                    r"SOFTWARE\Docker Inc.\Docker Desktop",
+                ):
+                    try:
+                        with winreg.OpenKey(hive, sub) as k:
+                            for val_name in ("Path", "InstallLocation", ""):
+                                try:
+                                    val, _ = winreg.QueryValueEx(k, val_name)
+                                    val = str(val or "").strip().strip('"')
+                                    if val:
+                                        carpetas.append(os.path.dirname(val) if val.lower().endswith(".exe") else val)
+                                        carpetas.append(os.path.join(val, "Docker"))
+                                except FileNotFoundError:
+                                    continue
+                    except OSError:
+                        continue
+        except Exception:
+            pass
     en_path = shutil.which("docker")
     if en_path:
         d = os.path.dirname(os.path.abspath(en_path))
@@ -281,8 +308,30 @@ RUTAS_DOCKER_WINDOWS = tuple(dict.fromkeys(
     + [os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "Docker Toolbox", "docker.exe")]))
 #: «Docker Desktop.exe» desde la 2.x; «Docker for Windows.exe» en las versiones viejas
 _NOMBRES_DOCKER_DESKTOP_EXE = ("Docker Desktop.exe", "Docker for Windows.exe")
-DOCKER_DESKTOP_EXE = next((os.path.join(c, n) for c in _CARPETAS_DOCKER_WINDOWS for n in _NOMBRES_DOCKER_DESKTOP_EXE
-                           if os.path.exists(os.path.join(c, n))), r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
+
+
+def _ruta_docker_desktop():
+    """Localiza Docker Desktop dinámicamente en Windows (refresca DOCKER_DESKTOP_EXE aunque se haya instalado después)."""
+    carpetas = _carpetas_docker_windows() if ES_WINDOWS else []
+    encontrado = next(
+        (os.path.join(c, n) for c in carpetas for n in _NOMBRES_DOCKER_DESKTOP_EXE if os.path.exists(os.path.join(c, n))),
+        r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+    )
+    if ES_WINDOWS and os.path.exists(encontrado):
+        globals()["DOCKER_DESKTOP_EXE"] = encontrado
+    return encontrado
+
+
+def _es_sesion_system_windows():
+    """True cuando el proceso corre en Sesión 0 como NT AUTHORITY\\SYSTEM (no puede abrir ventanas en escritorio de usuario)."""
+    if not ES_WINDOWS:
+        return False
+    usr = (os.environ.get("USERNAME") or "").strip().upper()
+    prof = (os.environ.get("USERPROFILE") or "").strip().lower()
+    return usr in ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE") or usr.endswith("$") or "systemprofile" in prof
+
+
+DOCKER_DESKTOP_EXE = _ruta_docker_desktop()
 
 
 def _docker_desktop_linux():
@@ -304,7 +353,7 @@ def _socket_docker_desktop(casa):
         _SOCKET_DESKTOP["ruta"] = ""
         try:
             r = subprocess.run([DOCKER, "context", "inspect", "desktop-linux", "--format", "{{.Endpoints.docker.Host}}"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
             host = (r.stdout or "").strip().splitlines()[0] if r.returncode == 0 and (r.stdout or "").strip() else ""
             if host.startswith("unix://"):
                 _SOCKET_DESKTOP["ruta"] = host[7:]
@@ -322,7 +371,8 @@ def _contar_contenedores(host=None):
     if host:
         entorno["DOCKER_HOST"] = host
     try:
-        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno)
+        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno,
+                           creationflags=_NO_WINDOW)
     except Exception:
         return -1
     return len(r.stdout.split()) if r.returncode == 0 else -1
@@ -359,7 +409,8 @@ def _probar_motor(host):
     entorno = dict(os.environ)
     entorno["DOCKER_HOST"] = host
     try:
-        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno)
+        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno,
+                           creationflags=_NO_WINDOW)
     except Exception:
         return -1, False
     if r.returncode == 0:
@@ -390,7 +441,8 @@ def motores_docker():
 def _contar_contenedores_sistema():
     entorno = {k: v for k, v in os.environ.items() if k != "DOCKER_HOST"}
     try:
-        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno)
+        r = subprocess.run([DOCKER, "ps", "-aq"], capture_output=True, text=True, timeout=20, env=entorno,
+                           creationflags=_NO_WINDOW)
     except Exception:
         return -1
     return len(r.stdout.split()) if r.returncode == 0 else -1
@@ -753,8 +805,9 @@ def abrir_docker_desktop(reiniciar_colgado=False):
     tras reiniciar quedaba escondido). True si se pudo lanzar. Reiniciarlo cuando está encendido pero colgado SOLO si
     lo pide el usuario (reiniciar_colgado): hecho solo por el vigilante, paraba todos los contenedores cada minuto."""
     if ES_WINDOWS:
-        if os.path.exists(DOCKER_DESKTOP_EXE):
-            subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
+        ruta_dk = _ruta_docker_desktop()
+        if os.path.exists(ruta_dk):
+            subprocess.Popen([ruta_dk], close_fds=True, creationflags=_NO_WINDOW)
             return True
         return False
     if (run(["systemctl", "--user", "is-active", "docker-desktop"], timeout=15, env=_env_usuario())[1] or "").strip() == "active":
@@ -795,8 +848,9 @@ def abrir_interfaz_docker_desktop():
     con --disable-gpu --no-sandbox (sin GPU la ventana se cerraba sola). Nunca detiene ni reinicia Docker: si el
     servicio está apagado solo lo enciende."""
     if ES_WINDOWS:
-        if os.path.exists(DOCKER_DESKTOP_EXE):
-            subprocess.Popen([DOCKER_DESKTOP_EXE], close_fds=True)
+        ruta_dk = _ruta_docker_desktop()
+        if os.path.exists(ruta_dk):
+            subprocess.Popen([ruta_dk], close_fds=True, creationflags=_NO_WINDOW)
             log("Se abrió Docker Desktop.", "ok")
             return True
         raise RuntimeError("No se encontró Docker Desktop en Windows.")
@@ -938,7 +992,7 @@ def _psql(cont, sql, db=None, usuario="postgres", clave=None, solo_tcp=False):
     bases_probar = []
     if db and db != "postgres":
         bases_probar.append(db)
-    for cand in ("app_v2_db", "facturapro_02", "template1", "facturapro", "postgres"):
+    for cand in ("template1", "app_v2_db", "facturapro", "postgres"):
         if cand not in bases_probar:
             bases_probar.append(cand)
 
@@ -1001,7 +1055,7 @@ def _analizar_pg_contenedor(c, candidatos, config):
               "contenedores": [_resumen(x) for x in candidatos], "clave": clave_de(c), "motor": c.get("motor", ""),
               "host": c.get("host", ""), "creado": c.get("creado", "")}
         if pg["corriendo"]:
-            db_conn = db_env or "app_v2_db"
+            db_conn = db_env or "template1"
             ok, out = _psql(c["nombre"], "select datname, pg_get_userbyid(datdba) from pg_database "
                                          "where not datistemplate and datname <> 'postgres' order by 1",
                             db=db_conn, usuario=usuario, clave=clave)
@@ -1418,33 +1472,24 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
         if not dentro:
             lineas.append(linea)
     bloque = [MARCA_HBA_INICIO, "# Por el túnel de bore solo entra FacturaPro (lo escribe FacPro Servidor)."]
-    # Autorizar usuarios del sistema: el de la app, el admin del contenedor, Harpi_postgres_ y el dueño
-    usuarios_permitidos = {u for u in (usuario, admin_usuario, "Harpi_postgres_", "postgres", "facturapro_app") if u}
-    # Localhost (127.0.0.1 y ::1) siempre con acceso completo para herramientas locales y psql
-    for loc in ("127.0.0.1/32", "::1/128"):
-        for u in usuarios_permitidos:
-            bloque += [
-                "host all %s %s scram-sha-256" % (u, loc),
-                "host all %s %s md5" % (u, loc),
-                "host all %s %s trust" % (u, loc),
-            ]
+    # El usuario de la app entra por el túnel; el dueño de la base (sea cual sea su nombre) también, pero SOLO cifrado
+    # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
     for red in subredes:
-        for u in usuarios_permitidos:
+        if admin_usuario:
             bloque += [
-                "host all %s %s scram-sha-256" % (u, red),
-                "host all %s %s md5" % (u, red),
-                "host all %s %s trust" % (u, red),
-                "hostssl all %s %s scram-sha-256" % (u, red),
-                "hostssl all %s %s md5" % (u, red),
-                "hostssl all %s %s trust" % (u, red),
+                "host all %s %s scram-sha-256" % (admin_usuario, red),
+                "host all %s %s md5" % (admin_usuario, red),
+                "hostssl all %s %s scram-sha-256" % (admin_usuario, red),
+                "hostssl all %s %s md5" % (admin_usuario, red),
             ]
-        for b in (base, "app_v2_db", "facturapro_02", "template1", "postgres"):
+        for b in (base, "facturapro_02", "template1"):
             bloque += [
-                "host %s all %s scram-sha-256" % (b, red),
-                "host %s all %s md5" % (b, red),
-                "hostssl %s all %s scram-sha-256" % (b, red),
-                "hostssl %s all %s md5" % (b, red),
+                "host %s %s %s scram-sha-256" % (b, usuario, red),
+                "host %s %s %s md5" % (b, usuario, red),
+                "hostssl %s %s %s scram-sha-256" % (b, usuario, red),
+                "hostssl %s %s %s md5" % (b, usuario, red),
             ]
+        bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
     code, out = run([DOCKER, "exec", "-i", cont, "sh", "-c", "cat > '%s'" % ruta.replace("'", "")], entrada=nuevo, timeout=30)
@@ -2169,8 +2214,12 @@ def estado_puente_siaci(lista_contenedores=None):
             code, out = run(["schtasks", "/Query", "/TN", tn, "/FO", "CSV", "/NH"], timeout=6)
             if code == 0 and out.strip():
                 linea = out.strip().splitlines()[-1]
-                corriendo_t = any(w in linea.lower() for w in ("running", "ejecut", "ready", "listo"))
-                tareas.append({"nombre": tn, "activa": corriendo_t, "detalle": linea})
+                bajo_t = linea.lower()
+                deshabilitada = any(w in bajo_t for w in ("disabled", "deshabilit"))
+                corriendo_t = (not deshabilitada) and any(
+                    w in bajo_t for w in ("running", "ejecut", "ready", "listo", "queued", "encolad")
+                )
+                tareas.append({"nombre": tn, "activa": corriendo_t, "deshabilitada": deshabilitada, "detalle": linea})
     instalado = bool(conts or tareas or (ES_WINDOWS and os.path.exists(r"C:\FacProSIACI\puente.ps1")))
     corriendo_todo = (all(x["corriendo"] for x in conts) if conts else True) and (all(t["activa"] for t in tareas) if tareas else True)
     return {
@@ -2180,6 +2229,148 @@ def estado_puente_siaci(lista_contenedores=None):
         "tareas": tareas,
         "empresas": "01 Harpicorp + 02 Trahiec" if len(conts) >= 2 or any("02" in t["nombre"] for t in tareas) else ("01 Harpicorp" if instalado else ""),
     }
+
+
+_DOCKER_AUTO_ARRANQUE = {"ultimo": 0.0}
+_AUTODETECT_LOCK = threading.Lock()
+
+
+def _asegurar_docker_encendido_auto(cooldown=90):
+    """Abre Docker Desktop / servicio Docker automáticamente si está instalado pero apagado."""
+    ruta_dk = _ruta_docker_desktop() if ES_WINDOWS else ""
+    est = docker_estado()
+    if est.get("corriendo"):
+        return True
+    if not est.get("instalado"):
+        return False
+    ahora = time.time()
+    if ahora - _DOCKER_AUTO_ARRANQUE["ultimo"] < cooldown:
+        return False
+    _DOCKER_AUTO_ARRANQUE["ultimo"] = ahora
+    if ES_WINDOWS:
+        if _es_admin_windows():
+            run(["sc", "config", "com.docker.service", "start=", "auto"], timeout=10)
+            run(["sc", "start", "com.docker.service"], timeout=15)
+        if not _es_sesion_system_windows() and ruta_dk and os.path.exists(ruta_dk):
+            log("Docker estaba cerrado: abriendo Docker Desktop automáticamente…", "paso")
+            try:
+                return bool(iniciar_docker(manual=False))
+            except Exception:
+                return False
+        est2 = docker_estado()
+        if not est2.get("corriendo") and _es_sesion_system_windows():
+            # En Sesión 0, intenta disparar la tarea interactiva de sesión si existe para levantar UI/Docker
+            run(["schtasks", "/Run", "/TN", TAREA_UI_WINDOWS], timeout=10)
+        return bool(est2.get("corriendo"))
+    try:
+        log("Docker estaba apagado: encendiéndolo automáticamente…", "paso")
+        return bool(iniciar_docker(manual=False))
+    except Exception:
+        return False
+
+
+def _asegurar_red_y_conexion_contenedores(lista_contenedores):
+    """Asegura que facpro-red exista y los contenedores de BD/túnel/SIACI puedan comunicarse."""
+    if not docker_estado().get("corriendo"):
+        return
+    try:
+        asegurar_red()
+    except Exception:
+        return
+    for c in lista_contenedores or []:
+        nom = c.get("nombre") or ""
+        img = (c.get("imagen") or "").lower()
+        if nom in (C_PG, C_BORE_PG) or "bore" in img or _es_siaci(c):
+            with en_motor(c.get("host")):
+                conectar_a_red(nom)
+
+
+def autodetectar_entorno(auto_iniciar=True):
+    """Autodetecta Docker, PostgreSQL, MinIO, túneles Bore y Puente SIACI, arranca los detenidos y guarda la config."""
+    with _AUTODETECT_LOCK:
+        cambios = []
+        if ES_WINDOWS:
+            _ruta_docker_desktop()
+        est = docker_estado()
+        if auto_iniciar and est.get("instalado") and not est.get("corriendo"):
+            if _asegurar_docker_encendido_auto(cooldown=90):
+                cambios.append("docker_encendido")
+                est = docker_estado()
+        config = leer_config()
+        if est.get("corriendo"):
+            lista = contenedores_todos()
+            targets_cfg = {x for x in (config.get("pg_contenedor"), config.get("minio_contenedor"),
+                                       C_PG, C_MINIO, C_BORE_PG, C_BORE_MINIO) if x}
+            reiniciados = False
+            for c in lista:
+                nom = c.get("nombre") or ""
+                img = (c.get("imagen") or "").lower()
+                es_clave = nom in targets_cfg or _es_siaci(c) or ("bore" in img)
+                if not es_clave:
+                    continue
+                with en_motor(c.get("host")):
+                    info = inspeccionar(nom)
+                    if _politica(info) != "always":
+                        code_u, _ = dk("update", "--restart", "always", nom)
+                        if code_u == 0:
+                            cambios.append("%s:restart=always" % nom)
+                    if auto_iniciar and c.get("estado") != "running":
+                        code_s, _ = dk("start", nom)
+                        if code_s == 0:
+                            cambios.append("%s:encendido" % nom)
+                            reiniciados = True
+            if reiniciados:
+                time.sleep(1.5)
+                lista = contenedores_todos()
+            pg = analizar_postgres(lista, config)
+            mi = analizar_minio(lista, None, config)
+            modificado = False
+            if not config.get("pg_contenedor") and pg.get("contenedor"):
+                config["pg_contenedor"] = pg["contenedor"]
+                if pg.get("docker_host"):
+                    config["docker_host"] = pg["docker_host"]
+                if pg.get("puerto_host"):
+                    config["pg_puerto_host"] = pg["puerto_host"]
+                if pg.get("usuario") and not config.get("pg_usuario"):
+                    config["pg_usuario"] = pg["usuario"]
+                if pg.get("base") and not config.get("pg_base"):
+                    config["pg_base"] = pg["base"]
+                cambios.append("pg_adoptado:%s" % pg["contenedor"])
+                modificado = True
+            if not config.get("minio_contenedor") and mi.get("contenedor"):
+                config["minio_contenedor"] = mi["contenedor"]
+                if mi.get("docker_host"):
+                    config["minio_docker_host"] = mi["docker_host"]
+                if mi.get("puerto"):
+                    config["minio_puerto"] = mi["puerto"]
+                cambios.append("minio_adoptado:%s" % mi["contenedor"])
+                modificado = True
+            if not config.get("bore_puerto_pg"):
+                for c in lista:
+                    img = (c.get("imagen") or "").lower()
+                    if c.get("estado") == "running" and (c.get("nombre") == C_BORE_PG or ("bore" in img and "minio" not in c.get("nombre", "").lower())):
+                        with en_motor(c.get("host")):
+                            asignado, _ = _puerto_bore_de_logs(c["nombre"])
+                        if asignado:
+                            config["bore_puerto_pg"] = int(asignado)
+                            cambios.append("bore_adoptado:%s" % asignado)
+                            modificado = True
+                            break
+            if modificado:
+                guardar_config(config)
+            _asegurar_red_y_conexion_contenedores(lista)
+        res_siaci = asegurar_puente_siaci()
+        if res_siaci.get("reparados"):
+            cambios.append("siaci:%d" % res_siaci["reparados"])
+        if cambios:
+            log("Autodetección completada (%s)." % ", ".join(cambios), "ok")
+        return {
+            "ok": True,
+            "docker_corriendo": bool(est.get("corriendo")),
+            "cambios": cambios,
+            "siaci": res_siaci,
+            "config": sin_secretos(leer_config()),
+        }
 
 
 def asegurar_puente_siaci():
@@ -2197,23 +2388,29 @@ def asegurar_puente_siaci():
                         dk("start", c["nombre"])
                         reparados += 1
     if ES_WINDOWS:
-        for tn in ("FacPro SIACI Espejo", "FacPro SIACI Escritura", "FacPro SIACI Espejo 02", "FacPro SIACI Escritura 02"):
+        for tn in TAREAS_SIACI_WINDOWS:
             code, out = run(["schtasks", "/Query", "/TN", tn, "/FO", "CSV", "/NH"], timeout=6)
             if code == 0 and out.strip():
                 bajo = out.lower()
-                if "running" not in bajo and "ejecut" not in bajo:
+                if any(w in bajo for w in ("disabled", "deshabilit")):
+                    run(["schtasks", "/Change", "/TN", tn, "/Enable"], timeout=8)
+                    reparados += 1
+                es_continua = ("espejo" in tn.lower()) or ("escritura" in tn.lower())
+                if es_continua and not any(w in bajo for w in ("running", "ejecut", "en ejecuci", "queued", "encolad")):
                     run(["schtasks", "/Run", "/TN", tn], timeout=10)
                     reparados += 1
     return {"ok": True, "reparados": reparados}
 
 
 def asegurar_piloto_automatico_silencioso():
-    """Activa automáticamente (sin botones manuales) el auto-arranque de Docker, el vigilante, el modo admin
-    y la política --restart always en todos los contenedores clave y en el Puente SIACI."""
+    """Activa automáticamente (sin botones manuales) el auto-arranque de Docker, el vigilante, el modo admin,
+    la autodetección del entorno y la política --restart always en todos los contenedores clave y en el Puente SIACI."""
     try:
+        if ES_WINDOWS:
+            _limpiar_runasadmin_windows()
         est = docker_estado()
         if est.get("instalado") and not est.get("corriendo") and not est.get("sin_permiso"):
-            iniciar_docker(manual=False)
+            _asegurar_docker_encendido_auto(cooldown=90)
             est = docker_estado()
         if est.get("instalado") and docker_al_arrancar().get("activo") is False:
             try:
@@ -2250,6 +2447,10 @@ def asegurar_piloto_automatico_silencioso():
                         ayudante({"orden": "bandera", "bandera": "--modo-admin"}, timeout=60)
                 except Exception:
                     pass
+        try:
+            autodetectar_entorno(auto_iniciar=True)
+        except Exception:
+            pass
         if est.get("corriendo"):
             config = leer_config()
             for c in contenedores_todos():
@@ -2312,13 +2513,98 @@ def reparar_tunel(config=None):
     return puerto
 
 
-def vuelta_vigilante(estado, fallos_para_reparar=1):
+def _sonda_tcp_tunel(host, puerto, timeout=8.0):
+    """Distingue túnel vivo ('ok'), lento ('lento') y puerto cerrado en bore.pub ('rechazado')."""
+    try:
+        with socket.create_connection((host, int(puerto)), timeout=timeout):
+            return "ok"
+    except ConnectionRefusedError:
+        return "rechazado"
+    except (TimeoutError, socket.timeout):
+        return "lento"
+    except OSError as e:
+        err_no = getattr(e, "errno", None)
+        if err_no in (111, 10061):
+            return "rechazado"
+        return "lento"
+
+
+def _estado_contenedor(nombre):
+    for c in contenedores():
+        if c.get("nombre") == nombre:
+            return c.get("estado") or ""
+    return ""
+
+
+def _vigilar_tunel_minio(estado, config, fallos_para_reparar=3):
+    """Supervisa y auto-repara el túnel de MinIO sin reiniciar PostgreSQL cuando el túnel está lento o separado."""
+    if not docker_estado().get("corriendo"):
+        return
+    lista_actual = contenedores()
+    minio_c = next((c for c in lista_actual if c.get("nombre") == C_BORE_MINIO), None)
+    puerto_minio = config.get("bore_puerto_minio")
+    if minio_c and minio_c.get("estado") == "running":
+        asignado_m, _ = _puerto_bore_de_logs(C_BORE_MINIO)
+        if asignado_m and asignado_m != puerto_minio:
+            config["bore_puerto_minio"] = int(asignado_m)
+            guardar_config(config)
+            puerto_minio = int(asignado_m)
+    if not puerto_minio and not minio_c:
+        return
+    if minio_c and minio_c.get("estado") != "running":
+        dk("start", C_BORE_MINIO)
+        time.sleep(2)
+    if puerto_minio:
+        st_m = _sonda_tcp_tunel(BORE_HOST, puerto_minio, timeout=8.0)
+        if st_m == "ok":
+            estado["fallos_minio"] = 0
+            return
+        if st_m == "lento" and minio_c and minio_c.get("estado") == "running":
+            estado["fallos_minio"] = estado.get("fallos_minio", 0) + 1
+            if estado["fallos_minio"] < max(fallos_para_reparar, 3):
+                log("Túnel MinIO (%s:%s) lento: esperando sin cerrarlo (%d/%d)"
+                    % (BORE_HOST, puerto_minio, estado["fallos_minio"], max(fallos_para_reparar, 3)), "aviso")
+                return
+        elif st_m == "rechazado":
+            log("Túnel MinIO (%s:%s) cerrado en bore.pub: levantándolo sin tocar PostgreSQL…"
+                % (BORE_HOST, puerto_minio), "aviso")
+    estado["fallos_minio"] = 0
+    dest_h, dest_p, extra_m = (_destino_tunel(C_BORE_MINIO) if minio_c else (C_MINIO_TLS, 9443, None))
+    try:
+        nuevo_m = levantar_bore(C_BORE_MINIO, dest_h, dest_p, puerto_minio, extra_m)
+        if nuevo_m:
+            cfg2 = leer_config()
+            if cfg2.get("bore_puerto_minio") != nuevo_m:
+                cfg2.update(bore_puerto_minio=nuevo_m, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+                guardar_config(cfg2)
+                evento("Túnel MinIO restablecido en %s:%s" % (BORE_HOST, nuevo_m), "ok")
+    except Exception as e:
+        log("No se pudo reparar el túnel MinIO: %s" % e, "aviso")
+
+
+def vuelta_vigilante(estado, fallos_para_reparar=3):
     """Una revisión rápida y auto-curativa. estado = {"fallos": n}. Devuelve lo que pasó."""
+    if not docker_estado().get("corriendo"):
+        try:
+            _asegurar_docker_encendido_auto(cooldown=90)
+        except Exception:
+            pass
+    config = leer_config()
+    if docker_estado().get("corriendo") and (not config.get("pg_contenedor") or not config.get("bore_puerto_pg")):
+        try:
+            autodetectar_entorno(auto_iniciar=True)
+            config = leer_config()
+        except Exception:
+            pass
     try:
         asegurar_puente_siaci()
     except Exception:
         pass
-    config = leer_config()
+    try:
+        _vigilar_tunel_minio(estado, config, fallos_para_reparar=fallos_para_reparar)
+        config = leer_config()
+    except Exception:
+        pass
     puerto = config.get("bore_puerto_pg")
     if not puerto:
         # Si hay un contenedor bore-postgres corriendo aunque config no tenga puerto, adoptarlo
@@ -2333,21 +2619,34 @@ def vuelta_vigilante(estado, fallos_para_reparar=1):
     # Verificar también si el contenedor bore-postgres cambió de puerto por su cuenta al reiniciar
     if docker_estado().get("corriendo") and any(c["nombre"] == C_BORE_PG and c["estado"] == "running" for c in contenedores()):
         asignado_actual, _ = _puerto_bore_de_logs(C_BORE_PG)
-        if asignado_actual and asignado_actual != puerto and sonda_ssl(BORE_HOST, asignado_actual, 6) is not None:
+        if asignado_actual and asignado_actual != puerto and sonda_ssl(BORE_HOST, asignado_actual, 8) is not None:
             evento("El contenedor del túnel adoptó un puerto nuevo en bore.pub: %s → %s" % (puerto, asignado_actual), "aviso")
             config.update(bore_puerto_pg=asignado_actual, actualizado=time.strftime("%Y-%m-%d %H:%M"))
             guardar_config(config)
             puerto = asignado_actual
-    if sonda_ssl(BORE_HOST, puerto, 6) is not None:
+    if sonda_ssl(BORE_HOST, puerto, 10) is not None:
         estado["fallos"] = 0
         if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
             estado["sincronizado_inicio"] = True
             informar_direccion(puerto, config)
         return "ok"
-    # Doble comprobación rápida (2 s) cuando fallos_para_reparar == 1 para no esperar minutos tras un reinicio
+    # Si el contenedor bore está activo y bore.pub simplemente está lento (timeout, NO connection refused), NO matar el túnel al primer fallo
+    cont_pg_estado = _estado_contenedor(C_BORE_PG) if docker_estado().get("corriendo") else ""
+    if cont_pg_estado == "running":
+        tcp_estado = _sonda_tcp_tunel(BORE_HOST, puerto, 8.0)
+        if tcp_estado == "lento":
+            estado["fallos"] = estado.get("fallos", 0) + 1
+            umbral = max(fallos_para_reparar, 3)
+            log("El túnel %s:%s está lento (sin cerrarse, %d/%d)" % (BORE_HOST, puerto, estado["fallos"], umbral), "aviso")
+            if estado["fallos"] < umbral:
+                return "caido"
+        elif tcp_estado == "ok":
+            estado["fallos"] = 0
+            return "ok"
+    # Doble comprobación rápida (2 s) si fallos_para_reparar <= 1 para evitar cierres por microcortes
     if fallos_para_reparar <= 1:
         time.sleep(2)
-        if sonda_ssl(BORE_HOST, puerto, 6) is not None:
+        if sonda_ssl(BORE_HOST, puerto, 10) is not None:
             estado["fallos"] = 0
             if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
                 estado["sincronizado_inicio"] = True
@@ -2368,7 +2667,8 @@ def vuelta_vigilante(estado, fallos_para_reparar=1):
             break
         time.sleep(2)
     estado["sincronizado_inicio"] = True
-    informar_direccion(nuevo)
+    if leer_config().get("puerto_informado") != nuevo:
+        informar_direccion(nuevo)
     if nuevo == puerto:
         evento("El túnel volvió a estar en línea (%s:%s, misma dirección)." % (BORE_HOST, nuevo), "ok")
     return "reparado" if nuevo == puerto else "puerto_nuevo"
@@ -2554,6 +2854,107 @@ def _vigilante_en_registro_hkcu():
             return bool(val)
     except Exception:
         return False
+
+TAREA_UI_WINDOWS = "FacPro Server Manager"
+
+
+def _rutas_ui_windows():
+    """Posibles ubicaciones del ejecutable de FacPro Server Manager en Windows (por máquina o por usuario)."""
+    rutas = [
+        os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
+        os.path.join(os.environ.get("ProgramW6432") or r"C:\Program Files", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
+    ]
+    if getattr(sys, "frozen", False):
+        exe = os.path.abspath(sys.executable)
+        if "factura" in os.path.basename(exe).lower():
+            rutas.append(exe)
+    return [r for r in dict.fromkeys(rutas) if r]
+
+
+def _limpiar_runasadmin_windows():
+    """Quita marcas heredadas RUNASADMIN que bloquean HKCU\\Run en Windows y disparan ventanas UAC constantes."""
+    if not ES_WINDOWS:
+        return
+    try:
+        import winreg
+        objetivos = list(_rutas_ui_windows())
+        objetivos.append(os.path.join(carpeta_datos(), "bin", "facpro-vigilante.exe"))
+        if getattr(sys, "frozen", False):
+            objetivos.append(os.path.abspath(sys.executable))
+        sub = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+        hives = [winreg.HKEY_CURRENT_USER]
+        if _es_admin_windows():
+            hives.append(winreg.HKEY_LOCAL_MACHINE)
+        for hive in hives:
+            try:
+                with winreg.OpenKey(hive, sub, 0, winreg.KEY_SET_VALUE) as k:
+                    for exe in dict.fromkeys(objetivos):
+                        if not exe:
+                            continue
+                        try:
+                            winreg.DeleteValue(k, exe)
+                        except FileNotFoundError:
+                            pass
+            except OSError:
+                continue
+    except Exception:
+        pass
+
+
+def _asegurar_tarea_ui_windows(usuario=None):
+    """Registra la tarea programada de sesión con RunLevel HighestAvailable para abrir FacPro Server Manager al iniciar sesión SIN UAC."""
+    if not ES_WINDOWS or not _es_admin_windows():
+        return False
+    exe_ui = next((r for r in _rutas_ui_windows() if os.path.exists(r)), "")
+    if not exe_ui:
+        return False
+    usr = (usuario or usuario_real() or "").strip()
+    from xml.sax.saxutils import escape as _xml_esc
+    if usr and usr.upper() != "SYSTEM":
+        principal = "<UserId>%s</UserId><LogonType>InteractiveToken</LogonType>" % _xml_esc(usr)
+        trig_usr = "<UserId>%s</UserId>" % _xml_esc(usr)
+    else:
+        principal = "<GroupId>S-1-5-4</GroupId>"
+        trig_usr = ""
+    xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Triggers><LogonTrigger><Enabled>true</Enabled>%s</LogonTrigger></Triggers>"
+        '<Principals><Principal id="Author">%s<RunLevel>HighestAvailable</RunLevel></Principal></Principals>'
+        "<Settings>"
+        "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+        "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+        "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+        "<AllowHardTerminate>false</AllowHardTerminate>"
+        "<StartWhenAvailable>true</StartWhenAvailable>"
+        "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"
+        "<Priority>7</Priority>"
+        "</Settings>"
+        '<Actions Context="Author"><Exec><Command>%s</Command><Arguments>--hidden</Arguments></Exec></Actions>'
+        "</Task>"
+    ) % (trig_usr, principal, _xml_esc(exe_ui))
+    ruta_xml = os.path.join(carpeta_datos(), "tarea-facpro-ui.xml")
+    os.makedirs(carpeta_datos(), exist_ok=True)
+    with open(ruta_xml, "w", encoding="utf-16") as f:
+        f.write(xml)
+    try:
+        code, _ = run(["schtasks", "/Create", "/TN", TAREA_UI_WINDOWS, "/XML", ruta_xml, "/F"], timeout=20)
+        if code != 0:
+            code, _ = run([
+                "schtasks", "/Create", "/TN", TAREA_UI_WINDOWS,
+                "/TR", '"%s" --hidden' % exe_ui, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+            ], timeout=20)
+        if code == 0:
+            _desbloquear_tarea_windows(TAREA_UI_WINDOWS)
+            return True
+    finally:
+        try:
+            os.remove(ruta_xml)
+        except OSError:
+            pass
+    return False
+
 
 def _desbloquear_tarea_windows(nombre_tarea):
     """Permite que procesos sin elevar (usuario estándar) puedan consultar y arrancar una tarea SYSTEM en Windows."""
@@ -2889,20 +3290,24 @@ def docker_al_arrancar():
 
 def activar_docker_al_arrancar():
     if ES_WINDOWS:
-        if os.path.exists(DOCKER_DESKTOP_EXE):
+        ruta_dk = _ruta_docker_desktop()
+        if os.path.exists(ruta_dk):
             run(["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Docker Desktop",
-                 "/t", "REG_SZ", "/d", '"%s"' % DOCKER_DESKTOP_EXE, "/f"], timeout=15)
+                 "/t", "REG_SZ", "/d", '"%s"' % ruta_dk, "/f"], timeout=15)
+        if _es_admin_windows():
+            run(["sc", "config", "com.docker.service", "start=", "auto"], timeout=10)
+            run(["sc", "start", "com.docker.service"], timeout=15)
         for ruta, clave in _ajustes_docker_desktop():
             try:
                 with open(ruta, encoding="utf-8") as f:
                     datos = json.load(f)
-                if clave in datos and not datos[clave]:
+                if isinstance(datos, dict) and datos.get(clave) is not True:
                     datos[clave] = True
                     with open(ruta, "w", encoding="utf-8") as f:
                         json.dump(datos, f, indent=2)
             except (OSError, ValueError):
                 pass
-        log("Docker Desktop se abrirá solo al iniciar sesión en Windows.", "ok")
+        log("Docker Desktop y el servicio de Docker se abrirán solos al iniciar Windows.", "ok")
         return {"ok": True}
     elegir_docker()
     if _MOTOR["nombre"] == "Docker Desktop":
@@ -3054,7 +3459,8 @@ def _orden_ayudante(pet, usuario, datos):
         cmd_base = _comando_cli() if ES_WINDOWS else (_comando_ayudante() + ["--datos", datos])
         try:
             r = subprocess.run(cmd_base + [bandera], capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=3600, env=entorno)
+                               encoding="utf-8", errors="replace", timeout=3600, env=entorno,
+                               creationflags=_NO_WINDOW)
             return {"ok": r.returncode == 0, "salida": ((r.stdout or "") + (r.stderr or ""))[-4000:]}
         except (OSError, subprocess.TimeoutExpired) as e:
             return {"ok": False, "error": str(e)}
@@ -3346,20 +3752,11 @@ def activar_modo_admin():
         except Exception:
             pass
 
-        # 6. Marcar ejecutables instalados con RUNASADMIN para que siempre abran con máximos privilegios
+        # 6. Quitar marcas RUNASADMIN (evita UAC constantes y bloqueos de arranque) y registrar tarea elevada al iniciar sesión
         try:
-            import winreg
-            posibles_exe = [
-                os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
-                os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "FacturaProEC Admin", "FacturaProEC Admin.exe"),
-                os.path.join(carpeta_datos(), "bin", "facpro-vigilante.exe"),
-            ]
-            if getattr(sys, "frozen", False):
-                posibles_exe.append(os.path.abspath(sys.executable))
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers") as k:
-                for exe in dict.fromkeys(posibles_exe):
-                    if exe and os.path.exists(exe):
-                        winreg.SetValueEx(k, exe, 0, winreg.REG_SZ, "~ RUNASADMIN")
+            _limpiar_runasadmin_windows()
+            _asegurar_tarea_ui_windows()
+            activar_docker_al_arrancar()
         except Exception:
             pass
 
@@ -4958,6 +5355,9 @@ def main(argv=None):
                 return 1
     if "--servicios" in args:
         print(json.dumps(servicios(), ensure_ascii=False, indent=2))
+        return 0
+    if "--autodetectar" in args:
+        print(json.dumps(autodetectar_entorno(auto_iniciar=True), ensure_ascii=False, indent=2))
         return 0
     if "--ayudante" in args:
         i = args.index("--uid") if "--uid" in args else -1

@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import ctypes
 
+_WIN_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
 def is_admin():
     """¿La aplicación tiene permisos de administrador? (Windows: UAC; Linux/macOS: root)"""
     if os.name != "nt":
@@ -71,7 +73,7 @@ def ping_host(host, timeout_ms=1000):
             cmd = f"ping -n 1 -w {timeout_ms} {host}"
         else:
             cmd = f"ping -c 1 -W 1 {host}"
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, creationflags=_WIN_NO_WINDOW)
         return res.returncode == 0
     except Exception:
         return False
@@ -128,7 +130,8 @@ def _scan_windows(target_ports, allowed_ips):
     # tronar el subprocess y aceptar cualquier encoding.
     res = subprocess.run("netstat -ano -p tcp", shell=True,
                          capture_output=True, text=True,
-                         encoding="utf-8", errors="replace")
+                         encoding="utf-8", errors="replace",
+                         creationflags=_WIN_NO_WINDOW)
     if res.returncode != 0:
         return suspicious
     for line in res.stdout.splitlines():
@@ -294,7 +297,8 @@ def inspect_special_ports() -> dict:
     # 1. Obtener PIDs en escucha según OS
     if sys.platform == "win32":
         try:
-            res_net = subprocess.run("netstat -ano -p tcp", shell=True, capture_output=True, text=True, timeout=5)
+            res_net = subprocess.run("netstat -ano -p tcp", shell=True, capture_output=True, text=True, timeout=5,
+                                     creationflags=_WIN_NO_WINDOW)
             for line in (res_net.stdout or "").splitlines():
                 if "LISTENING" in line:
                     parts = line.split()
@@ -314,7 +318,8 @@ def inspect_special_ports() -> dict:
         try:
             import csv
             import io
-            res_tasks = subprocess.run("tasklist /fo csv /nh", shell=True, capture_output=True, text=True, timeout=5)
+            res_tasks = subprocess.run("tasklist /fo csv /nh", shell=True, capture_output=True, text=True, timeout=5,
+                                       creationflags=_WIN_NO_WINDOW)
             reader = csv.reader(io.StringIO(res_tasks.stdout or ""))
             for row in reader:
                 if len(row) >= 2:

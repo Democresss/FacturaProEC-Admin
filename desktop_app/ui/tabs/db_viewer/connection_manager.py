@@ -23,6 +23,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy.engine import Engine
 from sqlalchemy import create_engine, inspect as sync_inspect
+from sqlalchemy.pool import NullPool
 
 
 _ENGINE_CACHE: dict[str, AsyncEngine] = {}
@@ -54,12 +55,13 @@ class ConnectionManager:
     """Cache de engines async por URL + helpers de test/inspect síncrono."""
 
     def get_async_engine(self, cfg: DbConfig, *, refresh: bool = False) -> AsyncEngine:
+        """Retorna AsyncEngine con NullPool para evitar conexiones atadas a event loops cerrados."""
         url = cfg.to_async_url()
         if refresh:
             self.dispose(url)
         eng = _ENGINE_CACHE.get(url)
         if eng is None:
-            eng = create_async_engine(url, echo=False, pool_pre_ping=True)
+            eng = create_async_engine(url, echo=False, poolclass=NullPool)
             _ENGINE_CACHE[url] = eng
         return eng
 
@@ -113,13 +115,16 @@ class ConnectionManager:
         import asyncio
         async def _run():
             eng = self.get_async_engine(cfg)
-            async with eng.connect() as conn:
-                # SQLAlchemy 2.0: asíncrono inspección vía run_sync
-                from sqlalchemy import inspect
-                names = await conn.run_sync(
-                    lambda sync_conn: inspect(sync_conn).get_table_names()
-                )
-                return names
+            try:
+                async with eng.connect() as conn:
+                    # SQLAlchemy 2.0: asíncrono inspección vía run_sync
+                    from sqlalchemy import inspect
+                    names = await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    )
+                    return names
+            finally:
+                await eng.dispose()
         try:
             loop = asyncio.new_event_loop()
             try:
