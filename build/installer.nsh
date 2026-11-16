@@ -34,7 +34,7 @@
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FacPro-SSH-22" dir=in action=allow protocol=TCP localport=22'
   Pop $0
 
-  ; 3. Ejecutar --modo-admin durante la instalación (registra Tarea SYSTEM al encender la PC + desbloquea SIACI)
+  ; 3. Ejecutar --modo-admin durante la instalación (registra FacPro Vigilante SYSTEM al encender + FacPro Server Manager XML sin límites + desbloquea SIACI)
   IfFileExists "$INSTDIR\resources\python-runtime\python.exe" 0 +4
     nsExec::ExecToLog '"$INSTDIR\resources\python-runtime\python.exe" "$INSTDIR\resources\python-backend\servidor\facpro_servidor.py" --modo-admin'
     Pop $0
@@ -44,8 +44,10 @@
     Pop $0
   facpro_admin_listo:
 
-  ; 4. Tarea programada elevada al iniciar sesión (arranca oculto en bandeja SIN ventana UAC)
-  nsExec::ExecToLog 'schtasks /Create /TN "FacPro Server Manager" /TR "\"$INSTDIR\FacturaProEC Admin.exe\" --hidden" /SC ONLOGON /RL HIGHEST /F'
+  ; 4. Garantizar arranque automático al encender/iniciar sesión (limpia entradas obsoletas y deja respaldo HKLM Run + tarea sin límite batería/72h)
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "FacturaProECStorageManager"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "FacturaProEC Admin" '"$INSTDIR\FacturaProEC Admin.exe" --hidden'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-ScheduledTask -TaskName ''FacPro Server Manager'' -ErrorAction SilentlyContinue)) { Register-ScheduledTask -TaskName ''FacPro Server Manager'' -Action (New-ScheduledTaskAction -Execute ''$INSTDIR\FacturaProEC Admin.exe'' -Argument ''--hidden'') -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)) -Principal (New-ScheduledTaskPrincipal -GroupId ''S-1-5-32-544'' -RunLevel Highest) -Force | Out-Null }"'
   Pop $0
   ; 5. Desbloquear lectura y ejecución de tareas SYSTEM (FacPro Vigilante, FacPro Server Manager y FacPro SIACI*)
   nsExec::ExecToLog 'icacls "$WINDIR\System32\Tasks\FacPro*" /grant "*S-1-5-11:(RX)" "*S-1-5-32-545:(RX)"'

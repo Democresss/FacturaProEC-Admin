@@ -474,13 +474,22 @@ function setAutostart(enable: boolean, manual = true): { ok: boolean; message: s
                       '/v', process.execPath, '/f'], { windowsHide: true }).on('error', () => {});
         if (app.isPackaged && esAdministradorWindows()) {
           if (enable) {
-            spawn('schtasks', [
-              '/Create', '/TN', 'FacPro Server Manager',
-              '/TR', `"${process.execPath}" --hidden`,
-              '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F',
-            ], { windowsHide: true }).on('error', () => {});
+            const exeEsc = process.execPath.replace(/'/g, "''");
+            const psCmd = [
+              `$a = New-ScheduledTaskAction -Execute '${exeEsc}' -Argument '--hidden'`,
+              `$t = New-ScheduledTaskTrigger -AtLogOn`,
+              `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew`,
+              `$p = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType InteractiveToken -RunLevel Highest`,
+              `Register-ScheduledTask -TaskName 'FacPro Server Manager' -Action $a -Trigger $t -Settings $s -Principal $p -Force | Out-Null`,
+            ].join('; ');
+            spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
+              { windowsHide: true }).on('error', () => {});
+            spawn('reg', ['add', 'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'FacturaProEC Admin',
+                          '/t', 'REG_SZ', '/d', `"${process.execPath}" --hidden`, '/f'], { windowsHide: true }).on('error', () => {});
           } else {
             spawn('schtasks', ['/Delete', '/TN', 'FacPro Server Manager', '/F'], { windowsHide: true }).on('error', () => {});
+            spawn('reg', ['delete', 'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'FacturaProEC Admin', '/f'],
+              { windowsHide: true }).on('error', () => {});
           }
         }
       }
