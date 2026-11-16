@@ -479,7 +479,7 @@ function setAutostart(enable: boolean, manual = true): { ok: boolean; message: s
               `$a = New-ScheduledTaskAction -Execute '${exeEsc}' -Argument '--hidden'`,
               `$t = New-ScheduledTaskTrigger -AtLogOn`,
               `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew`,
-              `$p = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType InteractiveToken -RunLevel Highest`,
+              `$p = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest`,
               `Register-ScheduledTask -TaskName 'FacPro Server Manager' -Action $a -Trigger $t -Settings $s -Principal $p -Force | Out-Null`,
             ].join('; ');
             spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],

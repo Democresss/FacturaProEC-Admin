@@ -53,6 +53,8 @@
   nsExec::ExecToLog 'icacls "$WINDIR\System32\Tasks\FacPro*" /grant "*S-1-5-11:(RX)" "*S-1-5-32-545:(RX)"'
   Pop $0
   ; 6. Activar ejecución inmediata del Vigilante SYSTEM 24/7
+  nsExec::ExecToLog 'schtasks /Run /TN "FacPro Servidor - vigilante del tunel"'
+  Pop $0
   nsExec::ExecToLog 'schtasks /Run /TN "FacPro Vigilante"'
   Pop $0
 !macroend
