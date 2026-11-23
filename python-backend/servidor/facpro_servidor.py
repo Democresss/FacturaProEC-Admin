@@ -2629,10 +2629,11 @@ def asegurar_piloto_automatico_silencioso():
             for c in contenedores_todos():
                 es_pg = bool(config.get("pg_contenedor")) and c["nombre"] == config.get("pg_contenedor")
                 es_mi = bool(config.get("minio_contenedor")) and c["nombre"] == config.get("minio_contenedor")
+                es_cf = c["nombre"] in (C_CLOUDFLARED, "facturapro_web_oficina")
                 es_bo = "bore" in c.get("imagen", "") or c["nombre"] in (C_BORE_PG, C_BORE_MINIO, C_MINIO_TLS)
                 if es_bo and not tunel_ok:
                     continue  # 🔒 Nunca abrir/forzar túneles sin autorización explícita + SSL verificado
-                if es_pg or es_mi or es_bo or _es_siaci(c):
+                if es_pg or es_mi or es_cf or es_bo or _es_siaci(c):
                     try:
                         with en_motor(c.get("host")):
                             info = inspeccionar(c["nombre"])
@@ -2641,6 +2642,14 @@ def asegurar_piloto_automatico_silencioso():
                                 _hacer_automatico(c["nombre"])
                     except Exception:
                         pass
+            # Auto-reconexión inteligente de Cloudflare Tunnel al iniciar el servidor
+            if config.get("cloudflared_activo") and _leer_token_cloudflared_local():
+                try:
+                    st_cf = estado_cloudflared()
+                    if not st_cf.get("corriendo"):
+                        levantar_cloudflared(detener_bore=False)
+                except Exception:
+                    pass
         asegurar_puente_siaci()
     except Exception:
         pass
