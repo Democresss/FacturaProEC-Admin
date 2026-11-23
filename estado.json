@@ -1,0 +1,4 @@
+{"version": "2.4.0", "commit": "166decc20501f65fb278df724089b653cdf6775c", "ref": "v2.4.0", "run": "45179115678",
+ "backend_linux": "success", "backend_windows": "success",
+ "app_linux": "success", "app_windows": "success",
+ "archivos": [{"mb":115,"nombre":"FacturaProEC-Admin-2.4.0-linux-amd64.deb"},{"mb":142,"nombre":"FacturaProEC-Admin-2.4.0-linux-x64.tar.gz"},{"mb":147,"nombre":"FacturaProEC-Admin-2.4.0-linux-x86_64.AppImage"},{"mb":115,"nombre":"FacturaProEC-Admin-2.4.0-linux-x86_64.rpm"},{"mb":97,"nombre":"FacturaProEC-Admin-2.4.0-win-x64.exe"},{"mb":0,"nombre":"latest-linux.yml"},{"mb":0,"nombre":"latest.yml"},{"mb":332,"nombre":"FacturaProEC-Admin-2.4.0-win.exe"},{"mb":0,"nombre":"latest.yml"}]}
