@@ -280,8 +280,15 @@ def cloudflare_activar(c: CloudflareCfg) -> Dict[str, Any]:
     """Levanta Cloudflare Tunnel (`cloudflare/cloudflared:2026.10.7`) en `facpro-red` sin abrir puertos.
     Si `token` viene vacío, usa automáticamente el token guardado en config.json o deploy_oficina/.env.oficina."""
     tok = (c.token or "").strip() or fs._leer_token_cloudflared_local()
-    if not tok:
-        return {"ok": False, "message": "No se encontró token de Cloudflare Tunnel. Pégalo una vez."}
+    if not tok or len(tok) < 20:
+        return {"ok": False, "message": "No se encontró token de Cloudflare Tunnel válido. Pégalo una vez."}
+    # Persistir de forma inmediata antes de lanzar el hilo asíncrono
+    try:
+        cfg = fs.leer_config()
+        cfg["cloudflared_token"] = tok
+        fs.guardar_config(cfg)
+    except Exception:
+        pass
     return _tarea("cloudflare", fs.levantar_cloudflared, tok, bool(c.detener_bore))
 
 

@@ -48,8 +48,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const [base, setBase] = useState<string>('');
   const [claveBase, setClaveBase] = useState('');
   const [puerto, setPuerto] = useState('');
-  const [minio, setMinio] = useState(false);
-  const [propio, setPropio] = useState(true);
+  const minio = true;
+  const propio = true;
   const [nativo, setNativo] = useState({ pg_usuario: 'postgres', pg_clave: '', pg_base: 'facturapro' });
   const [log, setLog] = useState<LineaLog[]>([]);
   const [tarea, setTarea] = useState<string>('');
@@ -496,22 +496,14 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               ))}
             </div>
           )}
-          {pg.estado === 'contenedor' && base !== NUEVA && bases.length > 0 && (
-            <label className="row items-center gap-4 fs-13" style={{ margin: '8px 0' }}>
-              <input type="checkbox" checked={propio} onChange={e => setPropio(e.target.checked)} />
-              <span><b>Usuario propio para FacturaPro</b> (recomendado): clave segura, sin superusuario, y por el túnel solo entra
-                ese usuario y solo a esta base. Tu usuario actual queda bloqueado desde internet y su clave no cambia.</span>
-            </label>
-          )}
+          <div className="fs-12" style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 10, background: 'rgba(34, 197, 94, 0.10)', border: '1px solid rgba(34, 197, 94, 0.30)', color: '#22c55e' }}>
+            <b>🔒 Seguridad obligatoria de fábrica (siempre activa):</b> SSL/TLS obligatorio en PostgreSQL y MinIO + usuario propio aislado sin superusuario. No es opcional ni se puede desactivar.
+          </div>
           <div className="form-row">
             <label className="form-label">Puerto fijo en bore.pub (vacío = automático)</label>
             <input className="input" style={{ maxWidth: 160 }} inputMode="numeric" value={puerto} onChange={e => setPuerto(e.target.value.replace(/\D/g, ''))} />
             <div className="fs-11 muted">Si ya usabas un puerto (por ejemplo 65300), déjalo para no cambiar la dirección en FacturaPro.</div>
           </div>
-          <label className="row items-center gap-4 fs-13" style={{ margin: '8px 0' }}>
-            <input type="checkbox" checked={minio} onChange={e => setMinio(e.target.checked)} />
-            <span>Publicar también MinIO <b>con SSL</b> y configurarlo solo en FacturaPro (usuario propio, solo su bucket). Opcional: sin esto tus archivos se guardan en tu base.</span>
-          </label>
           {listaMinio.length > 0 && (
             <div className="form-row">
               <label className="form-label">MinIO ({listaMinio.length} encontrado{listaMinio.length === 1 ? '' : 's'}){minio ? ': ¿cuál publico?' : ''}</label>
@@ -602,11 +594,16 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
       <Card title="Cloudflare Tunnel (Modo Oficina — 0 puertos abiertos)" icon={<span>☁️</span>}
             sub="Publica únicamente la web local (facturapro_web:8080) con HTTPS TLS 1.3 real sin abrir puertos en el router ni exponer PostgreSQL o MinIO."
-            right={cfEstado?.corriendo
-              ? <span className="badge" style={{ background: cfEstado.conectado ? '#16a34a' : '#d97706', color: '#fff' }}>
-                  {cfEstado.conectado ? 'Conectado' : 'Iniciando…'}
-                </span>
-              : <span className="badge">Apagado</span>}>
+            right={(
+              <div className="row gap-4 items-center">
+                {cfEstado?.token_guardado && <span className="badge ok">✓ Token guardado</span>}
+                {cfEstado?.corriendo
+                  ? <span className="badge" style={{ background: cfEstado.conectado ? '#16a34a' : '#d97706', color: '#fff' }}>
+                      {cfEstado.conectado ? 'Conectado' : 'Iniciando…'}
+                    </span>
+                  : <span className="badge">Apagado</span>}
+              </div>
+            )}>
         <div className="row gap-4 items-center" style={{ marginBottom: 8 }}>
           <input
             className="input mono flex-1"

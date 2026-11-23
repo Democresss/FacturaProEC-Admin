@@ -1764,6 +1764,7 @@ def _leer_token_cloudflared_local():
     if len(env_tok) >= 20:
         return env_tok
     candidatos = [
+        os.path.join(os.path.expanduser("~"), "FacturaProEC", "deploy_oficina", ".env.oficina"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "deploy_oficina", ".env.oficina"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "deploy_oficina", ".env.oficina"),
         os.path.join(carpeta_datos(), ".env.oficina"),
@@ -1822,6 +1823,11 @@ def levantar_cloudflared(token=None, detener_bore=False):
     tok = str(token or "").strip() or _leer_token_cloudflared_local()
     if not tok or len(tok) < 20:
         raise RuntimeError("Token de Cloudflare Tunnel inválido o demasiado corto.")
+    # Guardar el token inmediatamente para que nunca se pierda aunque falle Docker
+    config = leer_config()
+    config["cloudflared_token"] = tok
+    config["actualizado"] = time.strftime("%Y-%m-%d %H:%M")
+    guardar_config(config)
     if not docker_estado().get("instalado"):
         raise RuntimeError("Docker no está instalado.")
     if not iniciar_docker():
