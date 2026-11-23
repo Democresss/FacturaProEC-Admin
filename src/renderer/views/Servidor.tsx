@@ -57,7 +57,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const [verClave, setVerClave] = useState(false);
   const [enlace, setEnlace] = useState('');
   const [cfToken, setCfToken] = useState('');
-  const [cfDetenerBore, setCfDetenerBore] = useState(false);
+  const [cfDetenerBore, setCfDetenerBore] = useState(true);
   const [cfEstado, setCfEstado] = useState<{ corriendo?: boolean; conectado?: boolean; token_guardado?: boolean; hostname?: string; imagen?: string; contenedor?: string } | null>(null);
   const [servs, setServs] = useState<{ servicios: Servicio[]; todo_automatico: boolean } | null>(null);
   const [appAuto, setAppAuto] = useState<boolean | null>(null);
