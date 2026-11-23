@@ -57,7 +57,6 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const [verClave, setVerClave] = useState(false);
   const [enlace, setEnlace] = useState('');
   const [cfToken, setCfToken] = useState('');
-  const [cfDetenerBore, setCfDetenerBore] = useState(true);
   const [cfEstado, setCfEstado] = useState<{ corriendo?: boolean; conectado?: boolean; token_guardado?: boolean; hostname?: string; imagen?: string; contenedor?: string } | null>(null);
   const [servs, setServs] = useState<{ servicios: Servicio[]; todo_automatico: boolean } | null>(null);
   const [appAuto, setAppAuto] = useState<boolean | null>(null);
@@ -313,15 +312,15 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
               )}
             </div>
             <div className="stat-block">
-              <div className="fw-700">🐘 PostgreSQL + 🌐 Túnel</div>
+              <div className="fw-700">🐘 PostgreSQL + 🔒 SSL</div>
               <div className="fs-12 muted">
                 {pg.estado === 'contenedor' ? `En Docker: ${pg.contenedor}${donde(pg)} · SSL ${pg.ssl === true ? 'activo' : pg.ssl === false ? 'apagado (se activa)' : '—'}`
                   : pg.estado === 'nativo' ? 'Instalado en el equipo (puerto 5432)'
                   : pg.estado === 'no' ? 'No existe: se crea en Docker con clave segura' : 'Se revisa con Docker encendido'}
               </div>
-              <div className="fs-12 muted" style={{ marginTop: 4 }}>{a.internet?.bore_pub ? '✓ bore.pub responde' : '⚠ No se llega a bore.pub'}</div>
-              {a.conexion && <div className="fs-12" style={{ color: a.conexion.en_linea ? '#22c55e' : '#ef4444' }}>
-                {a.conexion.en_linea ? '✓ Tu base responde desde internet con SSL (01+02 sincronizadas)' : '⚠ Re-conectando túnel automáticamente…'}</div>}
+              <div className="fs-12" style={{ marginTop: 4, color: '#22c55e' }}>
+                ✓ Conexión protegida por SSL/TLS obligatorio
+              </div>
             </div>
             <div className="stat-block">
               <div className="fw-700">☁️ Cloudflare Tunnel + 📦 MinIO</div>
@@ -420,13 +419,13 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
       )}
 
       {tuneles.length > 0 && (
-        <Card title="Túneles abiertos" sub="Lo que está publicado en internet. Cerrar un túnel no apaga el contenedor." icon={<span>🔗</span>}>
+        <Card title="🧹 Túneles legacy detectados" sub="Ya usas Cloudflare Tunnel: puedes cerrar estos contenedores antiguos para liberar recursos." icon={<span>🧹</span>}>
           {tuneles.map(t => (
             <div key={t.contenedor} className="row between items-center" style={{ padding: '6px 0' }}>
-              <span className="mono fs-12">{t.contenedor}: bore.pub:{t.puerto || '?'} → {t.servicio} · {t.corriendo ? estadoTunel(t) : 'apagado'}
+              <span className="mono fs-12">{t.contenedor} ({t.servicio}) · {t.corriendo ? 'encendido' : 'apagado'}
                 {t.motor ? <span className="badge neutral" style={{ marginLeft: 6 }}>en {t.motor}</span> : null}</span>
-              <AsyncButton size="sm" variant="danger" confirmText={`El túnel «${t.contenedor}» dejará de verse desde internet.`}
-                           onClick={() => empezar('cerrar-tunel', '/api/servidor/cerrar-tunel', { nombre: t.contenedor, host: t.host || null })}>Cerrar túnel</AsyncButton>
+              <AsyncButton size="sm" variant="danger" confirmText={`Se eliminará el contenedor legacy «${t.contenedor}».`}
+                           onClick={() => empezar('cerrar-tunel', '/api/servidor/cerrar-tunel', { nombre: t.contenedor, host: t.host || null })}>Eliminar</AsyncButton>
             </div>
           ))}
         </Card>
@@ -498,11 +497,6 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           )}
           <div className="fs-12" style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 10, background: 'rgba(34, 197, 94, 0.10)', border: '1px solid rgba(34, 197, 94, 0.30)', color: '#22c55e' }}>
             <b>🔒 Seguridad obligatoria de fábrica (siempre activa):</b> SSL/TLS obligatorio en PostgreSQL y MinIO + usuario propio aislado sin superusuario. No es opcional ni se puede desactivar.
-          </div>
-          <div className="form-row">
-            <label className="form-label">Puerto fijo en bore.pub (vacío = automático)</label>
-            <input className="input" style={{ maxWidth: 160 }} inputMode="numeric" value={puerto} onChange={e => setPuerto(e.target.value.replace(/\D/g, ''))} />
-            <div className="fs-11 muted">Si ya usabas un puerto (por ejemplo 65300), déjalo para no cambiar la dirección en FacturaPro.</div>
           </div>
           {listaMinio.length > 0 && (
             <div className="form-row">
@@ -592,8 +586,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         </Card>
       )}
 
-      <Card title="Cloudflare Tunnel (Modo Oficina — 0 puertos abiertos)" icon={<span>☁️</span>}
-            sub="Publica únicamente la web local (facturapro_web:8080) con HTTPS TLS 1.3 real sin abrir puertos en el router ni exponer PostgreSQL o MinIO."
+      <Card title="Cloudflare Tunnel (0 puertos abiertos · $0/mes)" icon={<span>☁️</span>}
+            sub="Conecta tu PostgreSQL y MinIO locales con FacturaPro en la nube de forma cifrada, sin abrir puertos en el router y con reconexión automática tras cortes de luz."
             right={(
               <div className="row gap-4 items-center">
                 {cfEstado?.token_guardado && <span className="badge ok">✓ Token guardado</span>}
@@ -619,7 +613,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             onClick={async () => {
               await empezar('cloudflare', '/api/servidor/cloudflare/activar', {
                 token: cfToken.trim(),
-                detener_bore: cfDetenerBore,
+                detener_bore: true,
               });
               setCfToken('');
               cargarServicios();
@@ -640,12 +634,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             </AsyncButton>
           )}
         </div>
-        <label className="row gap-4 items-center fs-12 muted" style={{ cursor: 'pointer' }}>
-          <input type="checkbox" checked={cfDetenerBore} onChange={e => setCfDetenerBore(e.target.checked)} />
-          <span>Detener túneles <b>bore.pub</b> al activar Cloudflare (márcalo solo cuando ya no uses Cloud Run)</span>
-        </label>
         <div className="fs-11 muted" style={{ marginTop: 6 }}>
-          Imagen fijada: <span className="mono">{cfEstado?.imagen || 'cloudflare/cloudflared:2026.10.7'}</span> · Red Docker: <span className="mono">facpro-red</span> · En Cloudflare apunta el Public Hostname solo a <span className="mono">HTTP → facturapro_web:8080</span>.
+          Imagen fijada: <span className="mono">{cfEstado?.imagen || 'cloudflare/cloudflared:2026.10.7'}</span> · Red Docker: <span className="mono">facpro-red</span> · Reconexión automática 24/7.
         </div>
       </Card>
 

@@ -2799,8 +2799,17 @@ def _vigilar_tunel_minio(estado, config, fallos_para_reparar=3):
 
 
 def vuelta_vigilante(estado, fallos_para_reparar=3):
-    """Una revisión rápida con política fail-closed: solo vigila si el túnel fue autorizado y exige SSL real."""
+    """Una revisión rápida con política fail-closed: prioriza Cloudflare Tunnel y jamás revive bore.pub si Cloudflare está activo."""
     config = leer_config()
+    if config.get("cloudflared_activo"):
+        if docker_estado().get("corriendo"):
+            try:
+                st_cf = estado_cloudflared()
+                if not st_cf.get("corriendo") and _leer_token_cloudflared_local():
+                    levantar_cloudflared(detener_bore=True)
+            except Exception:
+                pass
+        return "cloudflare_ok"
     if not config.get("tunel_autorizado"):
         return "tunel_desactivado"
     if not docker_estado().get("corriendo"):
