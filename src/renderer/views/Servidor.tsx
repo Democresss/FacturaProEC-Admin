@@ -148,7 +148,6 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   const pg = a?.postgres || {};
   const dock = a?.docker || {};
-  const siaci = a?.siaci || {};
   const bases: Base[] = pg.bases || [];
   const baseSel = bases.find(b => b.nombre === base);
   const pideClave = !!baseSel && (baseSel.dueno !== pg.usuario || !pg.tiene_clave);
@@ -242,8 +241,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   return (
     <div>
-      <Card title="Servidor Local, Docker y Túnel Seguro" icon={<span>🛰</span>}
-            sub="Tu base de datos, almacenamiento MinIO y túnel Cloudflare en este equipo, listos y protegidos para FacturaPro."
+      <Card title="Servidor Local, Docker y Conexión Segura" icon={<span>🛰</span>}
+            sub="Tu base de datos y almacenamiento en este equipo, siempre listos y protegidos para FacturaPro."
             right={(
               <div className="row gap-8">
                 <AsyncButton size="sm" onClick={async () => {
@@ -336,18 +335,13 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
                   ? `✓ MinIO detectado (${listaMinio.length} contenedor${listaMinio.length > 1 ? 'es' : ''})`
                   : 'MinIO opcional (se crea en Docker si lo activas)'}
               </div>
-              {siaci.instalado && (
-                <div className="fs-11" style={{ marginTop: 4, color: siaci.corriendo ? '#22c55e' : '#fbbf24' }}>
-                  {siaci.corriendo ? '✓ Sincronizador externo activo' : '⚡ Sincronizador externo detectado'}
-                </div>
-              )}
             </div>
           </div>
         )}
       </Card>
 
       <Card title="Piloto Automático 24/7 (Pre-Activado)" icon={<span>⚡</span>}
-            sub="Todos los servicios críticos (Docker, PostgreSQL, Túnel Bore, Vigilante 24/7, Modo Admin y Puente SIACI 01+02) vienen activados por defecto y se auto-reparan solos tras cortes de luz o reinicios."
+            sub="Todos los servicios críticos (Docker, PostgreSQL, Almacenamiento y Vigilante 24/7) se mantienen listos y se recuperan solos tras cortes de luz o reinicios."
             right={<AsyncButton size="sm" onClick={cargarServicios}>↻</AsyncButton>}>
         {!servs && <div className="muted fs-12">Verificando piloto automático…</div>}
         {listaServicios.map(s => (
@@ -377,8 +371,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           <div className="btn-row" style={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
             <span className="fs-12" style={{ color: adminActivo ? '#22c55e' : '#fbbf24', fontWeight: 600 }}>
               {adminActivo
-                ? '✓ Modo Administrador SYSTEM, Firewall, Vigilante 24/7 y Puente SIACI activos sin intervención manual'
-                : '⚠ Activa el Modo Administrador (1 clic) para que el servicio corra como SYSTEM al encender la PC y no vuelva a pedir permisos'}
+                ? '✓ Modo Administrador, Docker Auto-Start y Vigilante 24/7 activos sin intervención manual'
+                : '⚠ Activa el Modo Administrador (1 clic) para que el servicio corra al encender el equipo y no vuelva a pedir permisos'}
             </span>
             <div className="row gap-6">
               {!adminActivo && (
@@ -394,7 +388,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         )}
         {listaServicios.some(s => s.tipo === 'vigilante' && s.sin_enlace) && (
           <div className="fs-12" style={{ color: 'var(--warning)' }}>
-            Falta el código de enlace (abajo): guárdalo una sola vez para que si bore.pub cambia el puerto, FacturaPro actualice 01 Harpicorp y 02 Trahiec al instante.
+            Falta el código de enlace (abajo): guárdalo una sola vez para sincronizar la conexión con FacturaPro automáticamente.
           </div>
         )}
       </Card>
@@ -565,8 +559,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
       )}
 
       {a && (
-        <Card title="Enlace Automático con FacturaPro (01 Harpicorp + 02 Trahiec)" icon={<span>🛡</span>}
-              sub="El Vigilante 24/7 ya viene pre-activado de fábrica: si bore.pub cambia el puerto tras un corte de luz o reinicio, lo detecta en segundos y actualiza automáticamente 01 Harpicorp y 02 Trahiec en FacturaPro.">
+        <Card title="Enlace Automático con FacturaPro" icon={<span>🛡</span>}
+              sub="El Vigilante 24/7 mantiene enlazado este servidor con tu cuenta de FacturaPro tras cortes de luz o reinicios.">
           <div className="row gap-4 items-center">
             <input className="input mono flex-1" placeholder="FPENLACE.…" value={enlace} onChange={e => setEnlace(e.target.value)} />
             <AsyncButton size="sm" disabled={!enlace.trim()} onClick={async () => {
@@ -596,7 +590,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
             </div>
           )}
           <div className="fs-12" style={{ margin: '8px 0', color: vig.enlace ? '#22c55e' : '#f59e0b' }}>
-            {vig.enlace ? (vig.problema ? `✖ Enlazado con ${vig.facturapro}, pero no se llega` : `✓ Enlazado con ${vig.facturapro} (Sincronización Dual 01+02 activa)`) : 'Sin enlace: pega el código FPENLACE arriba para que el cambio de puerto sea 100% automático'}
+            {vig.enlace ? (vig.problema ? `✖ Enlazado con ${vig.facturapro}, pero no se llega` : `✓ Enlazado con ${vig.facturapro}`) : 'Sin enlace: pega el código FPENLACE arriba para sincronizar automáticamente'}
             {' · '}✓ Vigilante 24/7 pre-activado
             {vig.informado ? ` · último aviso ${vig.informado} (puerto ${vig.puerto_informado})` : ''}
           </div>
@@ -617,7 +611,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           <input
             className="input mono flex-1"
             type="password"
-            placeholder={cfEstado?.token_guardado ? '✓ Token de facturapro-oficina ya configurado (opcional cambiar)' : 'Pega aquí tu TUNNEL_TOKEN de Cloudflare…'}
+            placeholder={cfEstado?.token_guardado ? '✓ Token de túnel ya guardado (opcional cambiar)' : 'Pega aquí tu TUNNEL_TOKEN de Cloudflare…'}
             value={cfToken}
             onChange={e => setCfToken(e.target.value)}
           />
