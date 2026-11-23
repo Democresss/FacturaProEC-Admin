@@ -26,15 +26,22 @@
   nsExec::ExecToLog 'sc start com.docker.service'
   Pop $0
 
-  ; 2. Reglas de Firewall de Windows para PostgreSQL (5432), MinIO (9000) y SSH SIACI (22)
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FacPro-PostgreSQL-5432" dir=in action=allow protocol=TCP localport=5432'
+  ; 2. Blindar Firewall de Windows: eliminar reglas entrantes abiertas heredadas (5432, 9000, 22)
+  ; Los túneles salientes no requieren abrir puertos entrantes en el Firewall de Windows.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-PostgreSQL-5432"'
   Pop $0
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FacPro-MinIO-9000" dir=in action=allow protocol=TCP localport=9000'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-MinIO-9000"'
   Pop $0
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FacPro-SSH-22" dir=in action=allow protocol=TCP localport=22'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-SSH-22"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-Port-5432"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-Port-9000"'
+  Pop $0
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="FacPro-Port-22"'
   Pop $0
 
-  ; 3. Ejecutar --modo-admin durante la instalación (registra FacPro Vigilante SYSTEM al encender + FacPro Server Manager XML sin límites + desbloquea SIACI)
+  ; 3. Ejecutar --modo-admin durante la instalación (registra permisos Docker y tareas sin abrir túneles sin autorización)
   IfFileExists "$INSTDIR\resources\python-runtime\python.exe" 0 +4
     nsExec::ExecToLog '"$INSTDIR\resources\python-runtime\python.exe" "$INSTDIR\resources\python-backend\servidor\facpro_servidor.py" --modo-admin'
     Pop $0
@@ -52,9 +59,6 @@
   ; 5. Desbloquear lectura y ejecución de tareas SYSTEM (FacPro Vigilante, FacPro Server Manager y FacPro SIACI*)
   nsExec::ExecToLog 'icacls "$WINDIR\System32\Tasks\FacPro*" /grant "*S-1-5-11:(RX)" "*S-1-5-32-545:(RX)"'
   Pop $0
-  ; 6. Activar ejecución inmediata del Vigilante SYSTEM 24/7
-  nsExec::ExecToLog 'schtasks /Run /TN "FacPro Servidor - vigilante del tunel"'
-  Pop $0
-  nsExec::ExecToLog 'schtasks /Run /TN "FacPro Vigilante"'
-  Pop $0
+  ; Nota de seguridad: NO se inicia automáticamente el túnel bore.pub durante la instalación;
+  ; el usuario debe autorizarlo explícitamente con SSL verificado desde la app.
 !macroend

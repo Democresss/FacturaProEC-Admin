@@ -65,6 +65,11 @@ class Accion(BaseModel):
     clave: Optional[str] = None   # Linux: clave de administrador escrita en la app (solo se usa ahora, no se guarda)
 
 
+class CloudflareCfg(BaseModel):
+    token: str = ""
+    detener_bore: bool = False
+
+
 ACCIONES = ("todo", "automatico", "docker-al-arrancar", "vigilante", "quitar-vigilante", "detener-suelto", "modo-admin")
 
 
@@ -237,20 +242,20 @@ def arrancar_vigilante_de_la_app() -> None:
 
 @router.post("/piloto-automatico")
 def piloto_automatico() -> Dict[str, Any]:
-    """Activa en silencio todos los servicios automáticos (Docker, Vigilante, Modo Admin, autodetect y Puente SIACI 01+02)."""
+    """Sincroniza servicios locales y Puente SIACI sin abrir túneles bore.pub si no fueron autorizados con SSL."""
     try:
         fs.asegurar_piloto_automatico_silencioso()
-        auto = fs.autodetectar_entorno(auto_iniciar=True)
-        return {"ok": True, "data": fs.servicios(), "autodetectado": auto, "message": "Piloto Automático 24/7 activado."}
+        auto = fs.autodetectar_entorno(auto_iniciar=False)
+        return {"ok": True, "data": fs.servicios(), "autodetectado": auto, "message": "Servicios sincronizados (túnel sujeto a autorización SSL)."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e)}
 
 
 @router.post("/autodetectar")
 def autodetectar() -> Dict[str, Any]:
-    """Autodetecta y repara Docker, contenedores PostgreSQL/MinIO/Bore/SIACI y configuración sin clics manuales."""
+    """Autodetecta Docker, PostgreSQL, MinIO y SIACI sin abrir túneles automáticamente."""
     try:
-        res = fs.autodetectar_entorno(auto_iniciar=True)
+        res = fs.autodetectar_entorno(auto_iniciar=False)
         return {"ok": bool(res.get("ok", True)), "data": res, "message": "Entorno autodetectado y sincronizado."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e)}
@@ -259,6 +264,34 @@ def autodetectar() -> Dict[str, Any]:
 @router.post("/avisar")
 def avisar() -> Dict[str, Any]:
     return _tarea("avisar", fs._avisar_ahora)
+
+
+@router.get("/cloudflare/estado")
+def cloudflare_estado() -> Dict[str, Any]:
+    """Estado en vivo del contenedor `facturapro_cloudflared`."""
+    try:
+        return {"ok": True, "data": fs.estado_cloudflared()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
+
+
+@router.post("/cloudflare/activar")
+def cloudflare_activar(c: CloudflareCfg) -> Dict[str, Any]:
+    """Levanta Cloudflare Tunnel (`cloudflare/cloudflared:2026.10.7`) en `facpro-red` sin abrir puertos.
+    Si `token` viene vacío, usa automáticamente el token guardado en config.json o deploy_oficina/.env.oficina."""
+    tok = (c.token or "").strip() or fs._leer_token_cloudflared_local()
+    if not tok:
+        return {"ok": False, "message": "No se encontró token de Cloudflare Tunnel. Pégalo una vez."}
+    return _tarea("cloudflare", fs.levantar_cloudflared, tok, bool(c.detener_bore))
+
+
+@router.post("/cloudflare/detener")
+def cloudflare_detener() -> Dict[str, Any]:
+    """Detiene y elimina `facturapro_cloudflared`."""
+    try:
+        return {"ok": True, "data": fs.detener_cloudflared(), "message": "Cloudflare Tunnel detenido."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
 
 
 def modo_linea_de_comandos(argv) -> Optional[int]:

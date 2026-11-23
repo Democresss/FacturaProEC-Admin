@@ -56,6 +56,9 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const [resultado, setResultado] = useState<any>(null);
   const [verClave, setVerClave] = useState(false);
   const [enlace, setEnlace] = useState('');
+  const [cfToken, setCfToken] = useState('');
+  const [cfDetenerBore, setCfDetenerBore] = useState(false);
+  const [cfEstado, setCfEstado] = useState<{ corriendo?: boolean; conectado?: boolean; token_guardado?: boolean; hostname?: string; imagen?: string; contenedor?: string } | null>(null);
   const [servs, setServs] = useState<{ servicios: Servicio[]; todo_automatico: boolean } | null>(null);
   const [appAuto, setAppAuto] = useState<boolean | null>(null);
   const desde = useRef(0);
@@ -63,25 +66,23 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
   const cargarServicios = useCallback(async () => {
     const r = await call('/api/servidor/servicios');
     if (r.ok) setServs(r.data);
+    const rc = await call('/api/servidor/cloudflare/estado');
+    if (rc.ok) setCfEstado(rc.data);
     const ea = (window as any).electronAPI;
     if (ea?.autostart?.get) {
       try {
-        let activo = !!(await ea.autostart.get());
-        if (!activo && ea?.autostart?.set) {
-          await ea.autostart.set(true);
-          activo = true;
-        }
+        const activo = !!(await ea.autostart.get());
         setAppAuto(activo);
       } catch { /* sin Electron */ }
     }
   }, [call]);
 
-  // Piloto Automático 24/7: se pre-activa al abrir y refresca estado cada 20 s
+  // Refresca estado de servicios cada 20 s sin auto-activar túneles ni modificar el arranque silenciosamente
   useEffect(() => {
-    call('/api/servidor/piloto-automatico', { method: 'POST' }).then(() => cargarServicios()).catch(() => cargarServicios());
+    cargarServicios();
     const id = setInterval(cargarServicios, 20000);
     return () => clearInterval(id);
-  }, [call, cargarServicios]);
+  }, [cargarServicios]);
 
   const analizar = useCallback(async (pg?: string, mi?: string) => {
     setCargando(true);
@@ -601,6 +602,58 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
           </div>
         </Card>
       )}
+
+      <Card title="Cloudflare Tunnel (Modo Oficina — 0 puertos abiertos)" icon={<span>☁️</span>}
+            sub="Publica únicamente la web local (facturapro_web:8080) con HTTPS TLS 1.3 real sin abrir puertos en el router ni exponer PostgreSQL o MinIO."
+            right={cfEstado?.corriendo
+              ? <span className="badge" style={{ background: cfEstado.conectado ? '#16a34a' : '#d97706', color: '#fff' }}>
+                  {cfEstado.conectado ? 'Conectado' : 'Iniciando…'}
+                </span>
+              : <span className="badge">Apagado</span>}>
+        <div className="row gap-4 items-center" style={{ marginBottom: 8 }}>
+          <input
+            className="input mono flex-1"
+            type="password"
+            placeholder={cfEstado?.token_guardado ? '✓ Token de facturapro-oficina ya configurado (opcional cambiar)' : 'Pega aquí tu TUNNEL_TOKEN de Cloudflare…'}
+            value={cfToken}
+            onChange={e => setCfToken(e.target.value)}
+          />
+          <AsyncButton
+            size="sm"
+            variant="primary"
+            disabled={!!tarea || (!cfToken.trim() && !cfEstado?.token_guardado)}
+            onClick={async () => {
+              await empezar('cloudflare', '/api/servidor/cloudflare/activar', {
+                token: cfToken.trim(),
+                detener_bore: cfDetenerBore,
+              });
+              setCfToken('');
+              cargarServicios();
+            }}>
+            ☁️ {cfEstado?.corriendo ? 'Reconectar Cloudflare' : 'Activar Cloudflare Tunnel'}
+          </AsyncButton>
+          {cfEstado?.corriendo && (
+            <AsyncButton
+              size="sm"
+              variant="danger"
+              disabled={!!tarea}
+              onClick={async () => {
+                const r = await call('/api/servidor/cloudflare/detener', { method: 'POST' });
+                toast('Cloudflare Tunnel', r.message || (r.ok ? 'Detenido' : 'Error'), r.ok ? 'success' : 'danger');
+                cargarServicios();
+              }}>
+              Detener
+            </AsyncButton>
+          )}
+        </div>
+        <label className="row gap-4 items-center fs-12 muted" style={{ cursor: 'pointer' }}>
+          <input type="checkbox" checked={cfDetenerBore} onChange={e => setCfDetenerBore(e.target.checked)} />
+          <span>Detener túneles <b>bore.pub</b> al activar Cloudflare (márcalo solo cuando ya no uses Cloud Run)</span>
+        </label>
+        <div className="fs-11 muted" style={{ marginTop: 6 }}>
+          Imagen fijada: <span className="mono">{cfEstado?.imagen || 'cloudflare/cloudflared:2026.10.7'}</span> · Red Docker: <span className="mono">facpro-red</span> · En Cloudflare apunta el Public Hostname solo a <span className="mono">HTTP → facturapro_web:8080</span>.
+        </div>
+      </Card>
 
       <Modal open={!!pidiendo} title="Clave de administrador" onClose={() => { setPidiendo(null); setClaveAdmin(''); }} maxWidth={440}
              footer={<>

@@ -51,7 +51,9 @@ DOCKER = os.environ.get("FACPRO_DOCKER", "docker")
 RED = "facpro-red"
 C_PG, C_MINIO = "facpro-postgres", "facpro-minio"
 C_BORE_PG, C_BORE_MINIO = "facpro-bore-postgres", "facpro-bore-minio"
+C_CLOUDFLARED = "facturapro_cloudflared"
 IMG_PG, IMG_MINIO, IMG_BORE, IMG_ALPINE = "postgres:17", "minio/minio", "ekzhang/bore", "alpine:3"
+IMG_CLOUDFLARED = "cloudflare/cloudflared:2026.10.7"
 IMG_SOCAT, IMG_MC = "alpine/socat", "quay.io/minio/mc"
 IMGS_MC = (IMG_MC, "minio/mc")          # minio/mc dejó de estar en Docker Hub: primero quay.io
 C_MINIO_TLS, V_MINIO_TLS = "facpro-minio-tls", "facpro-minio-tls"
@@ -1297,9 +1299,9 @@ def _esperar_postgres(cont, usuario, clave, segundos=90, db=None):
 def crear_postgres():
     usuario, clave, db = "facturapro", clave_segura(), "facturapro"
     puerto = 5432 if not puerto_abierto("127.0.0.1", 5432) else 5433
-    log("Creando PostgreSQL 17 en Docker («%s», puerto %d en esta red)…" % (C_PG, puerto), "paso")
+    log("Creando PostgreSQL 17 en Docker («%s», solo 127.0.0.1:%d local)…" % (C_PG, puerto), "paso")
     code, out = dk("run", "-d", "--name", C_PG, "--network", RED, "--restart", "unless-stopped",
-                   "-p", "%d:5432" % puerto, "-e", "POSTGRES_USER=" + usuario, "-e", "POSTGRES_PASSWORD=" + clave,
+                   "-p", "127.0.0.1:%d:5432" % puerto, "-e", "POSTGRES_USER=" + usuario, "-e", "POSTGRES_PASSWORD=" + clave,
                    "-e", "POSTGRES_DB=" + db, "-v", "facpro-pgdata:/var/lib/postgresql/data", IMG_PG, timeout=900)
     if code != 0:
         raise RuntimeError("No se pudo crear PostgreSQL: %s" % out[-400:])
@@ -1432,30 +1434,25 @@ MARCA_HBA_INICIO, MARCA_HBA_FIN = "# >>> facpro-servidor (túnel)", "# <<< facpr
 
 
 def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
-    """Por el túnel (red de Docker «facpro-red») solo puede entrar el usuario de FacturaPro y solo a su base:
-    cualquier otro usuario, por ejemplo el superusuario con una clave débil, queda rechazado desde internet.
-    Las conexiones locales y de otras redes de Docker siguen igual."""
-    redes_a_revisar = [RED, "siaci-red"]
-    info_cont = inspeccionar(cont)
-    for n in (info_cont.get("NetworkSettings") or {}).get("Networks", {}).keys():
-        if n and n not in redes_a_revisar:
-            redes_a_revisar.append(n)
+    """Blinda la red del túnel (`facpro-red`) en pg_hba.conf con política fail-closed:
+    - PROHÍBE cualquier conexión sin cifrado (`hostnossl ... reject`).
+    - Permite ÚNICAMENTE conexiones cifradas (`hostssl`) con `scram-sha-256` para el usuario
+      de FacturaPro sobre sus bases autorizadas (nunca expone al superusuario si hay usuario propio).
+    - Las redes locales internas (como `127.0.0.1` o `siaci-red`) siguen funcionando normalmente."""
+    subredes_tunel = []
+    code_s, sub_out = dk("network", "inspect", RED, "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
+    if code_s == 0 and sub_out:
+        for s in sub_out.split():
+            if re.match(r"^[0-9a-fA-F.:]+/\d+$", s) and s not in subredes_tunel:
+                subredes_tunel.append(s)
 
-    subredes = []
-    for r_nom in redes_a_revisar:
-        code_s, sub_out = dk("network", "inspect", r_nom, "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
-        if code_s == 0 and sub_out:
-            for s in sub_out.split():
-                if re.match(r"^[0-9a-fA-F.:]+/\d+$", s) and s not in subredes:
-                    subredes.append(s)
-
-    if not subredes:
-        log("No se pudo leer las subredes de Docker: el túnel no quedó limitado al usuario de FacturaPro.", "aviso")
+    if not subredes_tunel:
+        log("No se pudo leer la subred de %s: no se pudo blindar pg_hba.conf." % RED, "aviso")
         return False
     ok, ruta = _psql(cont, "show hba_file", usuario=admin_usuario, clave=admin_clave)
     ruta = (ruta or "").strip()
     if not ok or not ruta.startswith("/"):
-        log("No se encontró pg_hba.conf: el túnel no quedó limitado al usuario de FacturaPro.", "aviso")
+        log("No se encontró pg_hba.conf: el túnel no quedó blindado.", "aviso")
         return False
     code, actual = dk("exec", cont, "cat", ruta)
     if code != 0:
@@ -1471,24 +1468,24 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
             continue
         if not dentro:
             lineas.append(linea)
-    bloque = [MARCA_HBA_INICIO, "# Por el túnel de bore solo entra FacturaPro (lo escribe FacPro Servidor)."]
-    # El usuario de la app entra por el túnel; el dueño de la base (sea cual sea su nombre) también, pero SOLO cifrado
-    # (si FacturaPro tiene guardada la conexión del dueño, no se le corta la base)
-    for red in subredes:
-        if admin_usuario:
+    bloque = [
+        MARCA_HBA_INICIO,
+        "# Blindaje estricto SSL (FacPro Servidor): SOLO hostssl por la red del túnel; texto plano RECHAZADO.",
+    ]
+    bases_permitidas = []
+    for b in (base, "facturapro_02"):
+        if b and b not in bases_permitidas:
+            bases_permitidas.append(b)
+    for red in subredes_tunel:
+        # 1. Bloquear explícitamente cualquier conexión sin SSL desde la red del túnel
+        bloque.append("hostnossl all all %s reject" % red)
+        # 2. Permitir SOLO el usuario de FacturaPro (sin exponer superusuario si son distintos) y SOLO por hostssl
+        for b in bases_permitidas:
             bloque += [
-                "host all %s %s scram-sha-256" % (admin_usuario, red),
-                "host all %s %s md5" % (admin_usuario, red),
-                "hostssl all %s %s scram-sha-256" % (admin_usuario, red),
-                "hostssl all %s %s md5" % (admin_usuario, red),
-            ]
-        for b in (base, "facturapro_02", "template1"):
-            bloque += [
-                "host %s %s %s scram-sha-256" % (b, usuario, red),
-                "host %s %s %s md5" % (b, usuario, red),
                 "hostssl %s %s %s scram-sha-256" % (b, usuario, red),
                 "hostssl %s %s %s md5" % (b, usuario, red),
             ]
+        # 3. Rechazar todo lo demás en la red del túnel
         bloque += ["host all all %s reject" % red, "hostssl all all %s reject" % red]
     bloque.append(MARCA_HBA_FIN)
     nuevo = "\n".join(bloque + lineas) + "\n"
@@ -1500,8 +1497,8 @@ def blindar_tunel(cont, admin_usuario, admin_clave, base, usuario):
     if not ok:
         log("pg_hba.conf quedó escrito pero PostgreSQL no lo recargó: %s" % out[-200:], "aviso")
         return False
-    log("Por el túnel solo puede entrar «%s» y solo a «%s»: cualquier otro usuario queda rechazado desde internet."
-        % (usuario, base), "ok")
+    log("Blindaje SSL estricto aplicado en %s: SOLO hostssl para «%s» en %s (texto plano y superusuario bloqueados)."
+        % (RED, usuario, ", ".join(bases_permitidas)), "ok")
     return True
 
 
@@ -1728,7 +1725,7 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
 
     for i, puerto in enumerate(intentos):
         dk("rm", "-f", nombre)
-        args = ["run", "-d", "--name", nombre, "--network", RED, "--restart", "always"] + (extra or [])
+        args = ["run", "-d", "--name", nombre, "--network", RED, "--restart", "unless-stopped"] + (extra or [])
         for dns in DNS_TUNEL:
             args += ["--dns", dns]
         args += [IMG_BORE, "local", str(destino_puerto), "--local-host", destino_host, "--to", BORE_HOST]
@@ -1756,6 +1753,141 @@ def levantar_bore(nombre, destino_host, destino_puerto, preferido=None, extra=No
             continue
         raise RuntimeError(motivo_bore(logs))
     raise RuntimeError("bore.pub tenía ocupados los %d puertos probados. Intenta de nuevo en unos minutos." % len(intentos))
+
+
+def _leer_token_cloudflared_local():
+    """Busca el TUNNEL_TOKEN ya guardado (config.json, env o deploy_oficina/.env.oficina) para conectar en 1 clic."""
+    cfg_tok = str((leer_config() or {}).get("cloudflared_token") or "").strip()
+    if len(cfg_tok) >= 20:
+        return cfg_tok
+    env_tok = str(os.environ.get("CLOUDFLARE_TUNNEL_TOKEN") or "").strip()
+    if len(env_tok) >= 20:
+        return env_tok
+    candidatos = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "deploy_oficina", ".env.oficina"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "deploy_oficina", ".env.oficina"),
+        os.path.join(carpeta_datos(), ".env.oficina"),
+    ]
+    for ruta in candidatos:
+        try:
+            ruta_abs = os.path.abspath(ruta)
+            if os.path.exists(ruta_abs):
+                with open(ruta_abs, "r", encoding="utf-8") as f:
+                    for linea in f:
+                        s = linea.strip()
+                        if s.startswith("CLOUDFLARE_TUNNEL_TOKEN="):
+                            val = s.split("=", 1)[1].strip().strip('"').strip("'")
+                            if len(val) >= 20 and "PEGA_AQUI" not in val:
+                                return val
+        except Exception:
+            pass
+    return ""
+
+
+def estado_cloudflared():
+    """Devuelve estado actual del contenedor Cloudflare Tunnel (`facturapro_cloudflared`) en Docker."""
+    tok_ok = bool(_leer_token_cloudflared_local())
+    base = {
+        "corriendo": False,
+        "existe": False,
+        "conectado": False,
+        "token_guardado": tok_ok,
+        "hostname": "oficina.facturadorproecuador.org",
+        "imagen": IMG_CLOUDFLARED,
+        "contenedor": C_CLOUDFLARED,
+        "logs": "",
+    }
+    if not docker_estado().get("corriendo"):
+        return base
+    info = inspeccionar(C_CLOUDFLARED)
+    if not info:
+        return base
+    st = (info.get("State") or {})
+    running = bool(st.get("Running"))
+    code_l, logs = dk("logs", "--tail", "15", C_CLOUDFLARED)
+    conectado = bool(running and re.search(r"Registered tunnel connection|Connection .* registered", logs or "", re.I))
+    base.update({
+        "corriendo": running,
+        "existe": True,
+        "conectado": conectado,
+        "imagen": (info.get("Config") or {}).get("Image") or IMG_CLOUDFLARED,
+        "logs": (logs or "")[-800:] if code_l == 0 else "",
+    })
+    return base
+
+
+def levantar_cloudflared(token=None, detener_bore=False):
+    """Levanta `cloudflare/cloudflared:2026.10.7` en la red `facpro-red` (solo salida HTTPS/QUIC, 0 puertos abiertos).
+    Si `token` viene vacío, usa automáticamente el token guardado localmente."""
+    tok = str(token or "").strip() or _leer_token_cloudflared_local()
+    if not tok or len(tok) < 20:
+        raise RuntimeError("Token de Cloudflare Tunnel inválido o demasiado corto.")
+    if not docker_estado().get("instalado"):
+        raise RuntimeError("Docker no está instalado.")
+    if not iniciar_docker():
+        raise RuntimeError("Docker no responde. Enciéndelo e intenta de nuevo.")
+    asegurar_red()
+    config = leer_config()
+    for cont_loc in (config.get("pg_contenedor"), config.get("minio_contenedor"), "facturapro_web_oficina"):
+        if cont_loc and inspeccionar(cont_loc):
+            conectar_a_red(cont_loc)
+
+    dk("rm", "-f", C_CLOUDFLARED)
+    args = [
+        "run", "-d",
+        "--name", C_CLOUDFLARED,
+        "--network", RED,
+        "--restart", "unless-stopped",
+        "-e", "TUNNEL_TOKEN=" + tok,
+        IMG_CLOUDFLARED,
+        "tunnel", "--no-autoupdate", "run",
+    ]
+    code, out = dk(*args, timeout=600)
+    if code != 0:
+        raise RuntimeError("No se pudo crear el contenedor %s: %s" % (C_CLOUDFLARED, out[-300:]))
+    log("Cloudflare Tunnel (%s) iniciado en %s (esperando registro en borde Cloudflare)…" % (IMG_CLOUDFLARED, RED), "paso")
+
+    conectado = False
+    logs = ""
+    for _ in range(15):
+        time.sleep(1)
+        st = estado_cloudflared()
+        logs = st.get("logs") or ""
+        if st.get("conectado"):
+            conectado = True
+            break
+        if not st.get("corriendo"):
+            break
+
+    if detener_bore:
+        for b_nom in (C_BORE_PG, C_BORE_MINIO):
+            dk("rm", "-f", b_nom)
+        config["tunel_autorizado"] = False
+        log("Túneles bore.pub detenidos tras activar Cloudflare Tunnel.", "ok")
+
+    config["cloudflared_activo"] = True
+    config["cloudflared_token"] = tok
+    config["actualizado"] = time.strftime("%Y-%m-%d %H:%M")
+    guardar_config(config)
+
+    if conectado:
+        log("Cloudflare Tunnel conectado y registrado correctamente (0 puertos abiertos).", "ok")
+    else:
+        log("Cloudflare Tunnel arrancó; revisa logs si tarda en registrar: %s" % logs[-220:], "aviso")
+    return estado_cloudflared()
+
+
+def detener_cloudflared():
+    """Detiene y elimina `facturapro_cloudflared` y marca `cloudflared_activo=False`."""
+    dk("rm", "-f", C_CLOUDFLARED)
+    config = leer_config()
+    config["cloudflared_activo"] = False
+    config["actualizado"] = time.strftime("%Y-%m-%d %H:%M")
+    guardar_config(config)
+    log("Cloudflare Tunnel detenido.", "ok")
+    return estado_cloudflared()
+
+
 #: Opciones de «Configurar todo» que se pueden repetir solas (nunca claves)
 _OPCIONES_REPETIBLES = ("base", "minio", "puerto", "pg_contenedor", "minio_contenedor")
 _RECONFIGURANDO = threading.Lock()
@@ -1821,16 +1953,24 @@ def _configurar(opciones):
         if not ES_WINDOWS:
             extra_bore = ["--add-host", "host.docker.internal:host-gateway"]
         if sonda_ssl("127.0.0.1", destino_puerto, 3) is not True:
-            log("Tu PostgreSQL (fuera de Docker) no tiene SSL. Actívalo (ssl = on en postgresql.conf) antes de usarlo por internet.", "aviso")
+            raise RuntimeError(
+                "Bloqueado por seguridad: tu PostgreSQL (fuera de Docker) NO tiene SSL activo. "
+                "Activa ssl = on en postgresql.conf antes de abrir un túnel a internet."
+            )
 
-    # 2. Base de datos y SSL
+    # 2. Base de datos, SSL obligatorio y blindaje fail-closed de pg_hba.conf
     if pg:
         usuario, clave, base = preparar_base(pg, opciones)
         activar_ssl(pg["contenedor"], pg["admin_usuario"], pg["admin_clave"])
+        if not blindar_tunel(pg["contenedor"], pg["admin_usuario"], pg["admin_clave"], base, usuario):
+            raise RuntimeError(
+                "Bloqueado por seguridad: no se pudo aplicar pg_hba.conf estricto (hostssl). "
+                "No se abrirá el túnel sin blindaje SSL."
+            )
     else:
         usuario, clave, base = opciones["pg_usuario"], opciones["pg_clave"], opciones["pg_base"]
 
-    # 3. Túnel bore
+    # 3. Túnel bore (solo tras confirmar SSL + hostssl)
     if opciones.get("detener_bore_viejo"):
         detener_bore_fuera_de_docker()
     preferido = opciones.get("puerto") or config.get("bore_puerto_pg")
@@ -1849,9 +1989,9 @@ def _configurar(opciones):
                 asegurar_red()
             if m_info["estado"] == "no":
                 m_usuario, m_clave = "facpro", clave_segura()
-                log("Creando MinIO en Docker («%s»)…" % C_MINIO, "paso")
+                log("Creando MinIO en Docker («%s», solo 127.0.0.1 local)…" % C_MINIO, "paso")
                 code, out = dk("run", "-d", "--name", C_MINIO, "--network", RED, "--restart", "unless-stopped",
-                               "-p", "9000:9000", "-p", "9001:9001", "-e", "MINIO_ROOT_USER=" + m_usuario,
+                               "-p", "127.0.0.1:9000:9000", "-p", "127.0.0.1:9001:9001", "-e", "MINIO_ROOT_USER=" + m_usuario,
                                "-e", "MINIO_ROOT_PASSWORD=" + m_clave, "-v", "facpro-minio:/data",
                                IMG_MINIO, "server", "/data", "--console-address", ":9001", timeout=900)
                 if code != 0:
@@ -1886,7 +2026,7 @@ def _configurar(opciones):
         finally:
             _HILO.host = None
 
-    # 5. Prueba desde internet
+    # 5. Prueba desde internet (fail-closed: si responde SIN SSL, se destruye el túnel de inmediato)
     log("Probando la conexión desde internet (%s:%d)…" % (BORE_HOST, puerto_pg), "paso")
     en_linea = None
     for _ in range(6):
@@ -1895,15 +2035,19 @@ def _configurar(opciones):
             break
         time.sleep(2)
     if en_linea is None:
-        raise RuntimeError("El túnel está creado pero PostgreSQL no responde desde internet. Revisa: docker logs %s" % C_BORE_PG)
+        dk("rm", "-f", C_BORE_PG)
+        raise RuntimeError("El túnel fue cerrado porque PostgreSQL no responde desde internet. Revisa: docker logs %s" % C_BORE_PG)
     if en_linea is False:
-        log("PostgreSQL responde desde internet pero SIN SSL: no lo uses así.", "aviso")
-    else:
-        log("PostgreSQL responde desde internet con SSL", "ok")
+        dk("rm", "-f", C_BORE_PG)
+        raise RuntimeError(
+            "Bloqueado por seguridad: PostgreSQL respondió SIN SSL a través del túnel y se cerró automáticamente."
+        )
+    log("PostgreSQL responde desde internet con SSL verificado", "ok")
 
     url = "postgresql://%s:%s@%s:%d/%s?sslmode=require" % (quote(usuario, safe=""), quote(clave, safe=""), BORE_HOST, puerto_pg, quote(base, safe=""))
     nuevo = dict(config, version=VERSION, pg_contenedor=(pg or {}).get("contenedor", ""), pg_usuario=usuario,
-                 pg_base=base, bore_puerto_pg=puerto_pg, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+                 pg_base=base, bore_puerto_pg=puerto_pg, tunel_autorizado=True,
+                 actualizado=time.strftime("%Y-%m-%d %H:%M"))
     if minio:
         nuevo.update(minio_endpoint=minio["endpoint"], minio_usuario=minio.get("usuario", ""),
                      bore_puerto_minio=minio.get("puerto"), minio_contenedor=minio.get("contenedor", ""),
@@ -2285,8 +2429,27 @@ def _asegurar_red_y_conexion_contenedores(lista_contenedores):
                 conectar_a_red(nom)
 
 
-def autodetectar_entorno(auto_iniciar=True):
-    """Autodetecta Docker, PostgreSQL, MinIO, túneles Bore y Puente SIACI, arranca los detenidos y guarda la config."""
+def _postgres_ssl_verificado_local(config):
+    """Verifica que PostgreSQL tenga SSL activo localmente ANTES de permitir cualquier túnel."""
+    pg_cont = (config or {}).get("pg_contenedor") or ""
+    if pg_cont:
+        info = inspeccionar(pg_cont)
+        if not info:
+            return False
+        env = env_de(info)
+        admin_u, admin_c, _ = _credenciales_contenedor(env)
+        ok, est = _psql(pg_cont, "show ssl", usuario=admin_u or "postgres", clave=admin_c)
+        if ok and est.strip().lower() == "on":
+            return True
+        p_host = (config or {}).get("pg_puerto_host") or 5432
+        return sonda_ssl("127.0.0.1", int(p_host), 3) is True
+    p_nativo = (config or {}).get("pg_puerto") or (config or {}).get("pg_puerto_host") or 5432
+    return sonda_ssl("127.0.0.1", int(p_nativo), 3) is True
+
+
+def autodetectar_entorno(auto_iniciar=False):
+    """Autodetecta Docker, PostgreSQL, MinIO y Puente SIACI.
+    Política segura: NUNCA inicia ni activa túneles bore.pub automáticamente sin autorización explícita + SSL."""
     with _AUTODETECT_LOCK:
         cambios = []
         if ES_WINDOWS:
@@ -2299,21 +2462,24 @@ def autodetectar_entorno(auto_iniciar=True):
         config = leer_config()
         if est.get("corriendo"):
             lista = contenedores_todos()
+            # Solo contenedores locales de datos (PostgreSQL, MinIO, SIACI); JAMÁS abrir bore.pub automáticamente aquí
             targets_cfg = {x for x in (config.get("pg_contenedor"), config.get("minio_contenedor"),
-                                       C_PG, C_MINIO, C_BORE_PG, C_BORE_MINIO) if x}
+                                       C_PG, C_MINIO) if x}
             reiniciados = False
             for c in lista:
                 nom = c.get("nombre") or ""
                 img = (c.get("imagen") or "").lower()
-                es_clave = nom in targets_cfg or _es_siaci(c) or ("bore" in img)
+                if "bore" in img or nom in (C_BORE_PG, C_BORE_MINIO):
+                    continue
+                es_clave = nom in targets_cfg or _es_siaci(c)
                 if not es_clave:
                     continue
                 with en_motor(c.get("host")):
                     info = inspeccionar(nom)
-                    if _politica(info) != "always":
-                        code_u, _ = dk("update", "--restart", "always", nom)
+                    if _politica(info) not in ("always", "unless-stopped"):
+                        code_u, _ = dk("update", "--restart", "unless-stopped", nom)
                         if code_u == 0:
-                            cambios.append("%s:restart=always" % nom)
+                            cambios.append("%s:restart=unless-stopped" % nom)
                     if auto_iniciar and c.get("estado") != "running":
                         code_s, _ = dk("start", nom)
                         if code_s == 0:
@@ -2448,15 +2614,18 @@ def asegurar_piloto_automatico_silencioso():
                 except Exception:
                     pass
         try:
-            autodetectar_entorno(auto_iniciar=True)
+            autodetectar_entorno(auto_iniciar=False)
         except Exception:
             pass
         if est.get("corriendo"):
             config = leer_config()
+            tunel_ok = bool(config.get("tunel_autorizado")) and _postgres_ssl_verificado_local(config)
             for c in contenedores_todos():
                 es_pg = bool(config.get("pg_contenedor")) and c["nombre"] == config.get("pg_contenedor")
                 es_mi = bool(config.get("minio_contenedor")) and c["nombre"] == config.get("minio_contenedor")
                 es_bo = "bore" in c.get("imagen", "") or c["nombre"] in (C_BORE_PG, C_BORE_MINIO, C_MINIO_TLS)
+                if es_bo and not tunel_ok:
+                    continue  # 🔒 Nunca abrir/forzar túneles sin autorización explícita + SSL verificado
                 if es_pg or es_mi or es_bo or _es_siaci(c):
                     try:
                         with en_motor(c.get("host")):
@@ -2472,9 +2641,12 @@ def asegurar_piloto_automatico_silencioso():
 
 
 def reparar_tunel(config=None):
-    """Vuelve a levantar el túnel de PostgreSQL (y enciende Docker / contenedores si estaban apagados).
+    """Vuelve a levantar el túnel de PostgreSQL SOLO si fue autorizado y PostgreSQL tiene SSL activo.
     Devuelve el puerto con el que quedó (o None)."""
     config = config if config is not None else leer_config()
+    if not config.get("tunel_autorizado"):
+        log("Túnel desactivado por seguridad: autorízalo explícitamente desde «Configurar todo» con SSL.", "aviso")
+        return None
     anterior = config.get("bore_puerto_pg")
     if not docker_estado().get("corriendo"):
         log("Docker no estaba corriendo al revisar el túnel: encendiéndolo automáticamente…", "paso")
@@ -2487,6 +2659,10 @@ def reparar_tunel(config=None):
         log("PostgreSQL («%s») estaba apagado: encendiéndolo…" % pg, "paso")
         dk("start", pg)
         time.sleep(2)
+    if not _postgres_ssl_verificado_local(config):
+        dk("rm", "-f", C_BORE_PG)
+        evento("🔒 Bloqueado por seguridad: PostgreSQL NO tiene SSL activo; no se abrirá ningún puerto en bore.pub.", "error")
+        return None
     mi = config.get("minio_contenedor")
     if mi and any(c["nombre"] == mi and c["estado"] != "running" for c in contenedores()):
         dk("start", mi)
@@ -2504,6 +2680,17 @@ def reparar_tunel(config=None):
         puerto = levantar_bore(C_BORE_PG, destino_host, destino_puerto, anterior, extra)
     except RuntimeError as e:
         log(str(e), "error")
+        return None
+    # Fail-closed: verificar SSL real a través del túnel recién abierto
+    ssl_remoto = None
+    for _ in range(4):
+        ssl_remoto = sonda_ssl(BORE_HOST, puerto, 8)
+        if ssl_remoto is not None:
+            break
+        time.sleep(1.5)
+    if ssl_remoto is False:
+        dk("rm", "-f", C_BORE_PG)
+        evento("🔒 Seguridad: el túnel respondió SIN SSL y fue destruido automáticamente.", "error")
         return None
     if puerto != anterior:
         evento("bore.pub dio otro puerto: %s → %s" % (anterior, puerto), "aviso")
@@ -2537,13 +2724,22 @@ def _estado_contenedor(nombre):
 
 
 def _vigilar_tunel_minio(estado, config, fallos_para_reparar=3):
-    """Supervisa y auto-repara el túnel de MinIO sin reiniciar PostgreSQL cuando el túnel está lento o separado."""
+    """Supervisa y auto-repara el túnel TLS de MinIO SOLO si el túnel está autorizado y pasa por facpro-minio-tls:9443."""
+    if not config.get("tunel_autorizado"):
+        return
     if not docker_estado().get("corriendo"):
         return
     lista_actual = contenedores()
     minio_c = next((c for c in lista_actual if c.get("nombre") == C_BORE_MINIO), None)
+    tls_c = next((c for c in lista_actual if c.get("nombre") == C_MINIO_TLS), None)
     puerto_minio = config.get("bore_puerto_minio")
     if minio_c and minio_c.get("estado") == "running":
+        # Fail-closed: nunca permitir que bore-minio apunte directo a HTTP plano (:9000)
+        d_h, d_p, _ = _destino_tunel(C_BORE_MINIO)
+        if str(d_h) != C_MINIO_TLS or int(d_p or 0) != 9443:
+            dk("rm", "-f", C_BORE_MINIO)
+            evento("🔒 Seguridad: se cerró bore-minio porque no pasaba por el proxy TLS (%s:%s)." % (d_h, d_p), "error")
+            return
         asignado_m, _ = _puerto_bore_de_logs(C_BORE_MINIO)
         if asignado_m and asignado_m != puerto_minio:
             config["bore_puerto_minio"] = int(asignado_m)
@@ -2551,6 +2747,12 @@ def _vigilar_tunel_minio(estado, config, fallos_para_reparar=3):
             puerto_minio = int(asignado_m)
     if not puerto_minio and not minio_c:
         return
+    if not tls_c:
+        log("Túnel MinIO bloqueado: no existe el proxy TLS «%s»." % C_MINIO_TLS, "aviso")
+        return
+    if tls_c.get("estado") != "running":
+        dk("start", C_MINIO_TLS)
+        time.sleep(1.5)
     if minio_c and minio_c.get("estado") != "running":
         dk("start", C_BORE_MINIO)
         time.sleep(2)
@@ -2566,34 +2768,29 @@ def _vigilar_tunel_minio(estado, config, fallos_para_reparar=3):
                     % (BORE_HOST, puerto_minio, estado["fallos_minio"], max(fallos_para_reparar, 3)), "aviso")
                 return
         elif st_m == "rechazado":
-            log("Túnel MinIO (%s:%s) cerrado en bore.pub: levantándolo sin tocar PostgreSQL…"
+            log("Túnel MinIO (%s:%s) cerrado en bore.pub: levantándolo con TLS…"
                 % (BORE_HOST, puerto_minio), "aviso")
     estado["fallos_minio"] = 0
-    dest_h, dest_p, extra_m = (_destino_tunel(C_BORE_MINIO) if minio_c else (C_MINIO_TLS, 9443, None))
     try:
-        nuevo_m = levantar_bore(C_BORE_MINIO, dest_h, dest_p, puerto_minio, extra_m)
+        nuevo_m = levantar_bore(C_BORE_MINIO, C_MINIO_TLS, 9443, puerto_minio, None)
         if nuevo_m:
             cfg2 = leer_config()
             if cfg2.get("bore_puerto_minio") != nuevo_m:
                 cfg2.update(bore_puerto_minio=nuevo_m, actualizado=time.strftime("%Y-%m-%d %H:%M"))
                 guardar_config(cfg2)
-                evento("Túnel MinIO restablecido en %s:%s" % (BORE_HOST, nuevo_m), "ok")
+                evento("Túnel MinIO TLS restablecido en %s:%s" % (BORE_HOST, nuevo_m), "ok")
     except Exception as e:
         log("No se pudo reparar el túnel MinIO: %s" % e, "aviso")
 
 
 def vuelta_vigilante(estado, fallos_para_reparar=3):
-    """Una revisión rápida y auto-curativa. estado = {"fallos": n}. Devuelve lo que pasó."""
+    """Una revisión rápida con política fail-closed: solo vigila si el túnel fue autorizado y exige SSL real."""
+    config = leer_config()
+    if not config.get("tunel_autorizado"):
+        return "tunel_desactivado"
     if not docker_estado().get("corriendo"):
         try:
             _asegurar_docker_encendido_auto(cooldown=90)
-        except Exception:
-            pass
-    config = leer_config()
-    if docker_estado().get("corriendo") and (not config.get("pg_contenedor") or not config.get("bore_puerto_pg")):
-        try:
-            autodetectar_entorno(auto_iniciar=True)
-            config = leer_config()
         except Exception:
             pass
     try:
@@ -2607,24 +2804,27 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
         pass
     puerto = config.get("bore_puerto_pg")
     if not puerto:
-        # Si hay un contenedor bore-postgres corriendo aunque config no tenga puerto, adoptarlo
-        if docker_estado().get("corriendo") and any(c["nombre"] == C_BORE_PG and c["estado"] == "running" for c in contenedores()):
-            asignado, _ = _puerto_bore_de_logs(C_BORE_PG)
-            if asignado:
-                config.update(bore_puerto_pg=asignado, actualizado=time.strftime("%Y-%m-%d %H:%M"))
-                guardar_config(config)
-                puerto = asignado
-        if not puerto:
-            return "sin_tunel"
+        return "sin_tunel"
     # Verificar también si el contenedor bore-postgres cambió de puerto por su cuenta al reiniciar
     if docker_estado().get("corriendo") and any(c["nombre"] == C_BORE_PG and c["estado"] == "running" for c in contenedores()):
         asignado_actual, _ = _puerto_bore_de_logs(C_BORE_PG)
-        if asignado_actual and asignado_actual != puerto and sonda_ssl(BORE_HOST, asignado_actual, 8) is not None:
-            evento("El contenedor del túnel adoptó un puerto nuevo en bore.pub: %s → %s" % (puerto, asignado_actual), "aviso")
-            config.update(bore_puerto_pg=asignado_actual, actualizado=time.strftime("%Y-%m-%d %H:%M"))
-            guardar_config(config)
-            puerto = asignado_actual
-    if sonda_ssl(BORE_HOST, puerto, 10) is not None:
+        if asignado_actual and asignado_actual != puerto:
+            ssl_nuevo = sonda_ssl(BORE_HOST, asignado_actual, 8)
+            if ssl_nuevo is False:
+                dk("rm", "-f", C_BORE_PG)
+                evento("🔒 Seguridad: se cerró el túnel porque respondió SIN SSL en el puerto %s." % asignado_actual, "error")
+                return "bloqueado_sin_ssl"
+            if ssl_nuevo is True:
+                evento("El contenedor del túnel adoptó un puerto nuevo en bore.pub: %s → %s" % (puerto, asignado_actual), "aviso")
+                config.update(bore_puerto_pg=asignado_actual, actualizado=time.strftime("%Y-%m-%d %H:%M"))
+                guardar_config(config)
+                puerto = asignado_actual
+    ssl_actual = sonda_ssl(BORE_HOST, puerto, 10)
+    if ssl_actual is False:
+        dk("rm", "-f", C_BORE_PG)
+        evento("🔒 Seguridad: se cerró el túnel %s:%s porque PostgreSQL respondió SIN SSL." % (BORE_HOST, puerto), "error")
+        return "bloqueado_sin_ssl"
+    if ssl_actual is True:
         estado["fallos"] = 0
         if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
             estado["sincronizado_inicio"] = True
@@ -2640,13 +2840,15 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
             log("El túnel %s:%s está lento (sin cerrarse, %d/%d)" % (BORE_HOST, puerto, estado["fallos"], umbral), "aviso")
             if estado["fallos"] < umbral:
                 return "caido"
-        elif tcp_estado == "ok":
-            estado["fallos"] = 0
-            return "ok"
     # Doble comprobación rápida (2 s) si fallos_para_reparar <= 1 para evitar cierres por microcortes
     if fallos_para_reparar <= 1:
         time.sleep(2)
-        if sonda_ssl(BORE_HOST, puerto, 10) is not None:
+        ssl_recheck = sonda_ssl(BORE_HOST, puerto, 10)
+        if ssl_recheck is False:
+            dk("rm", "-f", C_BORE_PG)
+            evento("🔒 Seguridad: se cerró el túnel %s:%s porque PostgreSQL respondió SIN SSL." % (BORE_HOST, puerto), "error")
+            return "bloqueado_sin_ssl"
+        if ssl_recheck is True:
             estado["fallos"] = 0
             if config.get("enlace_facturapro") and (config.get("puerto_informado") != puerto or not estado.get("sincronizado_inicio")):
                 estado["sincronizado_inicio"] = True
@@ -2657,20 +2859,25 @@ def vuelta_vigilante(estado, fallos_para_reparar=3):
     if estado["fallos"] < fallos_para_reparar:
         return "caido"
     estado["fallos"] = 0
-    evento("El túnel %s:%s dejó de responder desde internet: levantándolo de nuevo…" % (BORE_HOST, puerto), "aviso")
+    evento("El túnel %s:%s dejó de responder desde internet: levantándolo de nuevo con SSL…" % (BORE_HOST, puerto), "aviso")
     nuevo = reparar_tunel(config)
     if not nuevo:
-        evento("No se pudo levantar el túnel: FacturaPro no llega a tu base. Se reintenta solo.", "error")
+        evento("No se pudo levantar el túnel con SSL: FacturaPro no llega a tu base. Se reintenta solo.", "error")
         return "sin_reparar"
     for _ in range(6):
-        if sonda_ssl(BORE_HOST, nuevo, 8) is not None:
+        ssl_post = sonda_ssl(BORE_HOST, nuevo, 8)
+        if ssl_post is False:
+            dk("rm", "-f", C_BORE_PG)
+            evento("🔒 Seguridad: se cerró el túnel recién creado porque respondió SIN SSL.", "error")
+            return "bloqueado_sin_ssl"
+        if ssl_post is True:
             break
         time.sleep(2)
     estado["sincronizado_inicio"] = True
     if leer_config().get("puerto_informado") != nuevo:
         informar_direccion(nuevo)
     if nuevo == puerto:
-        evento("El túnel volvió a estar en línea (%s:%s, misma dirección)." % (BORE_HOST, nuevo), "ok")
+        evento("El túnel volvió a estar en línea con SSL (%s:%s, misma dirección)." % (BORE_HOST, nuevo), "ok")
     return "reparado" if nuevo == puerto else "puerto_nuevo"
 
 
@@ -3732,12 +3939,14 @@ def activar_modo_admin():
         except Exception:
             pass
 
-        # 3. Reglas del Firewall de Windows Defender (Red Privada, Pública y Dominio) para PostgreSQL, MinIO y SSH SIACI
-        for nombre_fw, puerto_fw in (("FacPro-PostgreSQL-5432", 5432), ("FacPro-MinIO-9000", 9000), ("FacPro-SSH-22", 22)):
+        # 3. Blindar Firewall de Windows Defender: ELIMINAR reglas entrantes abiertas (5432, 9000, 22).
+        # Los túneles salientes NO requieren abrir puertos entrantes en la PC ni exponer PostgreSQL/MinIO/SSH a la red.
+        for nombre_fw in (
+            "FacPro-PostgreSQL-5432", "FacPro-MinIO-9000", "FacPro-SSH-22",
+            "FacPro-Port-5432", "FacPro-Port-9000", "FacPro-Port-22",
+        ):
             run(["netsh", "advfirewall", "firewall", "delete", "rule", "name=%s" % nombre_fw], timeout=10)
-            run(["netsh", "advfirewall", "firewall", "add", "rule", "name=%s" % nombre_fw,
-                 "dir=in", "action=allow", "protocol=TCP", "localport=%d" % puerto_fw, "profile=any"], timeout=15)
-        log("Firewall de Windows configurado (puertos 5432 PostgreSQL, 9000 MinIO y 22 SSH SIACI permitidos).", "ok")
+        log("Firewall de Windows blindado: reglas entrantes abiertas (5432, 9000, 22) eliminadas.", "ok")
 
         # 4. Instalar Vigilante como tarea SYSTEM (al encender el equipo, sin requerir inicio de sesión)
         res_vig = instalar_vigilante(forzar_sistema=True)
