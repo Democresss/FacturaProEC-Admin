@@ -225,7 +225,7 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   const motores: MotorDocker[] = dock.motores || [];
   const todos: Contenedor[] = a?.todos || [];
-  const [verTodos, setVerTodos] = useState(false);
+  const [verTodos, setVerTodos] = useState(true);
   const cambiarMotor = async (host: string) => {
     const r = await call('/api/servidor/motor', { method: 'POST', body: JSON.stringify({ host }) });
     toast('Docker', r.message, r.ok ? 'success' : 'danger');
@@ -242,8 +242,8 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
 
   return (
     <div>
-      <Card title="Servidor, Túnel y Puente SIACI (Piloto Automático 24/7)" icon={<span>🛰</span>}
-            sub="Tu base de datos y el Puente SIACI en este equipo, siempre listos y auto-reparados para FacturaPro (01 Harpicorp + 02 Trahiec)."
+      <Card title="Servidor Local, Docker y Túnel Seguro" icon={<span>🛰</span>}
+            sub="Tu base de datos, almacenamiento MinIO y túnel Cloudflare en este equipo, listos y protegidos para FacturaPro."
             right={(
               <div className="row gap-8">
                 <AsyncButton size="sm" onClick={async () => {
@@ -257,27 +257,27 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
         {servs && !adminActivo ? (
           <div className="row between items-center gap-8" style={{ marginBottom: 12, padding: '12px 14px', borderRadius: 10, background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.40)' }}>
             <div>
-              <div className="fs-13 fw-700" style={{ color: '#fbbf24' }}>🛡️ Activa el Modo Administrador (1 sola vez) para blindaje total en Windows/Linux</div>
+              <div className="fs-13 fw-700" style={{ color: '#fbbf24' }}>🛡️ Activa el Modo Administrador (1 sola vez) para arranque automático en Windows/Linux</div>
               <div className="fs-12 muted">
-                Registra el Vigilante como servicio <b>SYSTEM</b> (arranca al encender la PC sin iniciar sesión), abre el Firewall de Windows (5432 PostgreSQL / 9000 MinIO / 22 SSH SIACI), configura el grupo <code>docker-users</code> y desbloquea las 6 tareas del Puente SIACI sin volver a pedir UAC.
+                Registra el servicio al encender el equipo, mantiene el Firewall cerrado (0 puertos públicos expuestos) y habilita el acceso sin sudo a todos los motores Docker del equipo.
               </div>
             </div>
             <AsyncButton size="sm" variant="primary" disabled={!!tarea} onClick={() => accionConClave('modo-admin')}>
               🛡️ Activar Modo Administrador
             </AsyncButton>
           </div>
-        ) : (
+        ) : servs && adminActivo ? (
           <div className="row between items-center gap-8" style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 10, background: 'rgba(34, 197, 94, 0.10)', border: '1px solid rgba(34, 197, 94, 0.30)' }}>
             <div>
-              <div className="fs-13 fw-700" style={{ color: '#22c55e' }}>🛡️ Modo Administrador SYSTEM + ⚡ Piloto Automático 24/7 Activo</div>
+              <div className="fs-13 fw-700" style={{ color: '#22c55e' }}>🛡️ Modo Administrador + Arranque Automático Activo</div>
               <div className="fs-12 muted">
-                Servicio SYSTEM al encender el equipo, Firewall abierto (5432/9000/22), Vigilante 24/7 (cada 20 s), Docker Auto-Start y Puente SIACI Dual (01+02) encendidos sin intervención manual.
+                Servicio al encender el equipo, Firewall blindado (0 puertos públicos), Docker Auto-Start y vigilancia local activos.
               </div>
             </div>
-            <span className="badge ok" style={{ flexShrink: 0 }}>ADMIN + 24/7 ACTIVO</span>
+            <span className="badge ok" style={{ flexShrink: 0 }}>ADMIN ACTIVO</span>
           </div>
-        )}
-        {!a && <div className="muted">{cargando ? 'Revisando Docker, PostgreSQL, MinIO, Puente SIACI y el túnel…' : 'Sin datos todavía.'}</div>}
+        ) : null}
+        {!a && <div className="muted">{cargando ? 'Revisando Docker, PostgreSQL, MinIO y túneles…' : 'Sin datos todavía (verifica que el backend local haya arrancado).'}</div>}
         {a && (
           <div className="grid-3">
             <div className="stat-block">
@@ -325,17 +325,20 @@ export function ServidorView({ call, toast }: { call: Call; toast: Toast }) {
                 {a.conexion.en_linea ? '✓ Tu base responde desde internet con SSL (01+02 sincronizadas)' : '⚠ Re-conectando túnel automáticamente…'}</div>}
             </div>
             <div className="stat-block">
-              <div className="fw-700">🌉 Puente SIACI Dual (01 + 02)</div>
+              <div className="fw-700">☁️ Cloudflare Tunnel + 📦 MinIO</div>
               <div className="fs-12 muted">
-                {siaci.instalado
-                  ? (siaci.corriendo
-                      ? `✓ En tiempo real (${(siaci.contenedores || []).filter((c: any) => c.corriendo).map((c: any) => c.nombre).join(' + ') || 'activo'})`
-                      : '⚡ Auto-arrancando contenedores y tareas de SIACI…')
-                  : 'Listo para vigilar contenedores siaci-tiempo-real (01 Harpicorp y 02 Trahiec)'}
+                {cfEstado?.corriendo
+                  ? `✓ Túnel Cloudflare activo (${cfEstado.contenedor || 'facturapro_cloudflared'})`
+                  : 'Túnel Cloudflare listo para activar abajo (0 puertos abiertos)'}
               </div>
-              {siaci.tareas?.length > 0 && (
-                <div className="fs-11" style={{ marginTop: 4, color: '#22c55e' }}>
-                  ✓ {siaci.tareas.filter((t: any) => t.corriendo).length}/{siaci.tareas.length} tareas Windows SIACI vigiladas 24/7
+              <div className="fs-12 muted" style={{ marginTop: 4 }}>
+                {listaMinio.length > 0
+                  ? `✓ MinIO detectado (${listaMinio.length} contenedor${listaMinio.length > 1 ? 'es' : ''})`
+                  : 'MinIO opcional (se crea en Docker si lo activas)'}
+              </div>
+              {siaci.instalado && (
+                <div className="fs-11" style={{ marginTop: 4, color: siaci.corriendo ? '#22c55e' : '#fbbf24' }}>
+                  {siaci.corriendo ? '✓ Sincronizador externo activo' : '⚡ Sincronizador externo detectado'}
                 </div>
               )}
             </div>
